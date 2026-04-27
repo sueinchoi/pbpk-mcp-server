@@ -5,12 +5,18 @@ MCP (Model Context Protocol) server. Designed for use with Claude Code, Claude
 Desktop, or any MCP-capable client.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v1.6-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v2.5-blue.svg)](CHANGELOG.md)
 [![MCP](https://img.shields.io/badge/MCP-stdio-green.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-93%2F93-brightgreen.svg)](tests/test_silent_fallback.py)
 
 ## Highlights
 
-- **30 MCP tools** covering full PBPK workflow
+- **46 MCP tools** covering the full PBPK workflow + safety/audit layer
+- **LLM-driven interactive workflow** — describe the compound and the
+  question in plain English; the LLM searches PubChem / ChEMBL / PubMed
+  for missing parameters, asks the user when a value cannot be inferred,
+  and the server enforces every invariant before returning a result
+  (see [TUTORIAL.md](TUTORIAL.md)).
 - **7 partition coefficient methods**: Rodgers-Rowland, Lukacova, Schmitt,
   Poulin-Theil, Berezhkovskiy, PK-Sim, Kp_membrane
 - **ACAT 9-segment** absorption with dissolution, pH-dependent solubility,
@@ -19,13 +25,23 @@ Desktop, or any MCP-capable client.
 - **Dynamic DDI** with segmented liver dispersion model (1–N CSTRs in series)
   and inlet-driven enzyme inactivation/induction
 - **Population PBPK** with Monte Carlo variability (BW, CL, fu_p, ka, GFR)
+- **Allometric scaling** — simple BW^0.75, plus three advanced methods:
+  Tang fu-corrected (cross-species protein binding), Mahmood vertical
+  (brain-weight correction), and the multi-species Rule of Exponents.
+- **Local sensitivity analysis** — one-at-a-time normalized sensitivity
+  with FDA/EMA magnitude classification (high / moderate / low /
+  negligible) to identify which parameters drive the prediction.
 - **PKSimDB integration**: 38,326 ICRP/Tanaka population distributions,
   294 ontogeny points, 38 transporters
 - **Special populations**: 5 species (human/rat/mouse/dog/monkey), 5 CKD
-  stages, 4 Child-Pugh stages, pregnancy (GA 0–40 weeks)
+  stages, 4 Child-Pugh stages, pregnancy (GA 0–40 weeks, range-checked)
 - **Validated** against 6 reference compounds (Midazolam, Diazepam, Warfarin,
   Theophylline, Caffeine, Metformin) and DDI cases (Keto+Midaz 13.9x,
   Rifampin+Midaz 0.034x, both within literature ranges).
+- **Silent-fallback hardened** — schema-level discriminated unions, pint
+  units, range invariants, post-simulation dose-recovery assertion,
+  output-time provenance audit, citation verification against PubMed /
+  Crossref. 93 fail-fast tests cover the closed silent-fallback paths.
 
 ## Quick start
 
@@ -73,7 +89,7 @@ concentration-time plot is auto-saved.
 The `pbpk_help` MCP tool also returns the parameter input guide and Kp
 method selection rules at runtime.
 
-## Tool catalog (30 tools)
+## Tool catalog (46 tools)
 
 | Category | Tools |
 |---|---|
@@ -83,12 +99,15 @@ method selection rules at runtime.
 | Absorption | `simulate_acat`, `predict_lymphatic` |
 | Simulation | `run_pbpk_simulation`, `plot_concentration`, `run_population_pbpk` |
 | DDI | `predict_ddi`, `run_dynamic_ddi` |
-| Allometric | `allometric_scaling` |
+| Allometric | `allometric_scaling`, `fu_corrected_allometric_scaling` (Tang 2005), `vertical_allometric_scaling` (brain weight, Mahmood 1996), `mahmood_rule_of_exponents_scaling` (multi-species ROE) |
+| Sensitivity | `sensitivity_analysis` (one-at-a-time local, FDA/EMA magnitude classification) |
 | PKSimDB | `pksim_ontogeny`, `pksim_organ_volumes`, `pksim_transporters` |
 | Data I/O | `fit_to_observed`, `import_pksim_model` |
+| Session workflow | `register_compound`, `add_binding`, `add_clearance`, `add_absorption`, `add_transporters`, `select_model_structure`, `validate_model`, `simulate_validated`, `session_summary`, `audit_model_provenance` |
+| Citation verification | `verify_citation`, `verify_citation_list` (PubMed E-utils + Crossref) |
 | Help | `pbpk_help` |
 
-## Validation snapshot (v1.6)
+## Validation snapshot (v2.5)
 
 | Compound | Method | Vss (L/kg) | CL (L/h) | t½ (h) | Status |
 |---|---|---|---|---|---|

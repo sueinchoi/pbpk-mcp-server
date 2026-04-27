@@ -7,7 +7,7 @@ literature for missing parameters, asks you when a value cannot be
 inferred, and the server enforces every invariant before returning
 a result.
 
-**Server version:** v2.3  |  **42 tools** (30 PBPK + 10 session/audit + 2 citation)
+**Server version:** v2.5  |  **46 tools** (34 PBPK + 10 session/audit + 2 citation)
 
 ---
 
@@ -21,6 +21,8 @@ a result.
 - [Scenario D: Special populations](#scenario-d)
 - [Scenario E: Transporter-driven drug (statin-like)](#scenario-e)
 - [Scenario F: NSAID with EHC (Diclofenac, end-to-end)](#scenario-f)
+- [Scenario G: Preclinical → human allometric prediction](#scenario-g)
+- [Scenario H: Identifying the drivers (local sensitivity)](#scenario-h)
 - [Reference: Kp method selection](#kp-method-selection)
 - [Reference: Parameter naming rules](#parameter-naming-rules)
 - [The safety net: what the server enforces](#safety-net)
@@ -690,6 +692,228 @@ _Audit fingerprint: `7af1c8b2e0954d31`_
 
 ---
 
+<a id="scenario-g"></a>
+## Scenario G: Preclinical → human allometric prediction
+
+**Goal**: take observed animal PK and predict human CL. Four tools
+cover the spectrum from quick first-pass to publication-grade
+multi-species fits.
+
+### When to use which tool
+
+```
+single species, normal drug      →  allometric_scaling          (BW^0.75)
+single species, fu_p differs     →  fu_corrected_allometric_scaling   (Tang 2005)
+single species, suspect b≈0.7-1.0  →  vertical_allometric_scaling     (Mahmood brain weight)
+≥3 species CL data available     →  mahmood_rule_of_exponents_scaling (full ROE)
+```
+
+### G1 — Simple allometric scaling (rat → human)
+
+```python
+allometric_scaling(
+    CL_animal=2.0,      # rat CL (L/h)
+    Vss_animal=1.0,     # rat Vss (L)
+    BW_animal=0.25,     # rat BW (kg)
+    species="rat",
+    BW_human=70.0,
+)
+```
+
+Result:
+
+| Parameter | Animal | Human (predicted) |
+|---|---|---|
+| CL (L/h) | 2.0 | 137 |
+| Vss (L) | 1.0 | 280 |
+| t½ (h) | – | 1.42 |
+
+Exponents used: CL ∝ BW^0.75, Vss ∝ BW^1.0, t½ derived.
+
+### G2 — Fu-corrected (Tang 2005) for warfarin-like compounds
+
+For drugs where plasma binding differs across species (warfarin: rat
+fu_p ≈ 0.04 vs human fu_p ≈ 0.005, an 8× difference), naive BW^0.75
+scaling under-predicts CL by 8×.
+
+```python
+fu_corrected_allometric_scaling(
+    CL_animal=0.05, BW_animal=0.25,
+    fu_animal=0.04, fu_human=0.005,
+    BW_human=70.0,
+)
+```
+
+Result:
+
+| Parameter | Value |
+|---|---|
+| Naive CL_human (no fu correction) | 3.42 L/h |
+| **fu correction factor** (fu_h/fu_a) | **0.125** |
+| **Corrected CL_human** | **0.43 L/h** |
+
+The 8× correction factor brings the prediction much closer to the
+clinical 0.18 L/h for warfarin.
+
+### G3 — Vertical allometry (brain weight, Mahmood 1996)
+
+For drugs with high hepatic CL where simple BW^0.75 systematically
+under-predicts:
+
+```python
+vertical_allometric_scaling(
+    CL_animal=0.5, BW_animal=0.25,
+    species="rat", BW_human=70.0,
+)
+```
+
+Multiplies by `(BW_human × BrW_human) / (BW_animal × BrW_animal)`
+using built-in brain weights (mouse 0.4 g, rat 1.8 g, dog 72 g,
+monkey 95 g, human 1400 g).
+
+### G4 — Multi-species Rule of Exponents (Mahmood 1996)
+
+When ≥3 species data is available, the server fits the simple
+allometry exponent first and **chooses** the correction by the
+empirical b value:
+
+```python
+mahmood_rule_of_exponents_scaling(
+    species_data_csv="mouse:0.005:0.025, rat:0.04:0.25, dog:1.5:10",
+    BW_human=70.0,
+)
+```
+
+Result (excerpt):
+
+```
+| Simple-allometry exponent (b)  | 0.9548 |
+| Simple-allometry R²            | 0.9995 |
+| Method chosen                  | Brain-weight correction (0.70 < b ≤ 1.00) |
+| Predicted CL_human (L/h)       | 2.35   |
+```
+
+**Decision tree** (Rule of Exponents):
+
+| Simple b | Method chosen |
+|---|---|
+| b < 0.55 | Simple allometry |
+| 0.55 ≤ b ≤ 0.70 | MLP correction (CL × MLP regression) |
+| 0.70 < b ≤ 1.00 | Brain-weight correction (CL × BrW regression) |
+| b > 1.00 | **INAPPLICABLE — do not use prediction** ⚠️ |
+
+The b > 1.0 verdict is loud — the result is still computed but
+the output explicitly tells you "Do NOT use this prediction for
+human dosing."
+
+### G5 — When to be skeptical
+
+Even with the right method:
+- **Active transport** (OATPs, P-gp) is rarely allometric. Statins,
+  metformin, fexofenadine all violate simple scaling.
+- **Polymorphic enzymes** (CYP2C9, CYP2D6, NAT2): species-specific
+  isoform abundance breaks the assumption.
+- **Highly bound, low E** drugs: fu-corrected method (G2) usually
+  helps; verify with PBPK if available.
+
+---
+
+<a id="scenario-h"></a>
+## Scenario H: Identifying the drivers (local sensitivity)
+
+**Goal**: which parameters dominate the predicted PK? Use the
+result to (a) prioritize which measurements to chase, (b) decide
+where uncertainty matters most.
+
+### Method: one-at-a-time (OAT) local sensitivity
+
+For each parameter, perturb by ±5% (configurable) and measure the
+**central-difference normalized sensitivity**:
+
+$$S = \frac{\Delta \text{PK} / \text{PK}_{\text{base}}}{\Delta p / p_{\text{base}}}$$
+
+S = +1 means a 1% increase in parameter → 1% increase in PK metric.
+
+### H1 — Run sensitivity on midazolam AUC
+
+```python
+sensitivity_analysis(
+    name="midazolam", dose_mg=7.5, route="oral",
+    duration_h=24.0, body_weight=70.0, sex="male", age=35.0,
+    pk_metric="AUC_0_inf",
+    parameters="CL_int,fu_p,R_bp,ka,Fa,Fg",   # default: 6 common drivers
+    perturbation=0.05,                         # ±5%
+)
+```
+
+Result:
+
+| Rank | Parameter | Normalized S | Magnitude | Direction |
+|---|---|---|---|---|
+| 1 | `fu_p` | -1.099 | high | ↓ |
+| 2 | `Fg` | +1.000 | moderate | ↑ |
+| 3 | `Fa` | +1.000 | moderate | ↑ |
+| 4 | `CL_int` | -0.843 | moderate | ↓ |
+| 5 | `R_bp` | +0.095 | negligible | ↑ |
+| 6 | `ka` | +0.003 | negligible | ↑ |
+
+```
+Drivers (|S| ≥ 0.5): CL_int, fu_p, Fa, Fg
+  → these parameters dominate the prediction.
+  Prioritize getting measured values for these.
+```
+
+This matches the textbook intuition for high-extraction-ratio
+oral drugs: AUC_oral ∝ (Fa × Fg × fu_p) / CL_int. R_bp and ka are
+negligible for AUC at steady absorption.
+
+### H2 — Magnitude classification (FDA/EMA)
+
+| \|S\| | Magnitude | Interpretation |
+|---|---|---|
+| ≥ 1.0 | **high** | Proportional or super-proportional driver. A 10% error in this parameter ≥10% error in PK |
+| 0.5–1.0 | **moderate** | Major driver. 10% error → 5-10% PK error |
+| 0.1–0.5 | **low** | Secondary effect |
+| < 0.1 | **negligible** | Can be left at default / literature value |
+
+### H3 — Different metric, different drivers
+
+```python
+sensitivity_analysis(name="midazolam", dose_mg=7.5,
+                     pk_metric="Cmax", ...)
+```
+
+Cmax depends more on `ka` and `Fa`/`Fg` than on `CL_int` (because
+Cmax happens before substantial elimination). Running sensitivity
+for **each PK metric** of interest gives a richer picture than a
+single AUC analysis.
+
+### H4 — Action items from the result
+
+The drivers list directly tells you what measurements to pursue:
+
+1. **Top-3 drivers measured?** If yes, simulation is well-founded.
+   If no, ask the user (or run literature search for) those values.
+2. **A driver came from a default sentinel?** This is exactly the
+   silent-fallback case. The provenance audit will flag it; the
+   sensitivity analysis tells you it actually matters.
+3. **Drivers not in the perturbation list?** Add them (e.g.
+   `kp_method`, `Vmax`, `Km` for Michaelis-Menten) and re-run.
+
+### H5 — Limits of local OAT sensitivity
+
+- **Local**: only valid in the linear regime around the base. For
+  large parameter changes (e.g. ±50%), the linear approximation
+  breaks down — interactions and non-linearities take over.
+- **One-at-a-time**: doesn't capture interactions. Two parameters
+  that individually have S=0 can interact strongly. For
+  interaction analysis, use global sensitivity methods (Sobol,
+  Morris) — not currently implemented.
+- **Single subject**: variability is not assessed. For
+  population-level uncertainty, combine with `run_population_pbpk`.
+
+---
+
 <a id="kp-method-selection"></a>
 ## Reference: Kp method selection
 
@@ -795,6 +1019,6 @@ fingerprint — non-determinism is detectable.
 
 ---
 
-*Server v2.3 / 42 tools / 79 fail-fast tests / ODE: BDF (atol=1e-10, rtol=1e-8)*
+*Server v2.5 / 46 tools / 93 fail-fast tests / ODE: BDF (atol=1e-10, rtol=1e-8)*
 *For the full parameter guide at runtime, call the MCP tool `pbpk_help`.*
 *For the full provenance audit, call `audit_model_provenance(compound_id)` after `validate_model()`.*
