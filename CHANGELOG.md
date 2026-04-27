@@ -1,5 +1,59 @@
 # PBPK MCP Server — Changelog
 
+## v2.0 (2026-04-22) — Provenance audit (output-time silent-fallback detection)
+
+Adds a separate audit layer that runs at output time, complementing
+the input-time schema/invariant enforcement from v1.7-v1.9. The
+input layer rejects malformed inputs; the audit layer detects the
+opposite failure — outputs that look reasonable but were assembled
+from defaults the LLM didn't realize it was using.
+
+### New
+- `prompts/provenance_audit.py` — provenance audit prompt template
+  for use against any PBPK model. Forces a per-parameter row with
+  source type, citation, and confidence; refuses to summarize a
+  model as validated unless every row has a verifiable source.
+- `provenance_audit` MCP prompt — registered via `@mcp.prompt()`,
+  callable from any MCP client to apply the audit to LLM-built
+  models.
+- `audit_model_provenance(compound_id)` MCP tool — deterministic
+  server-side audit using session state. Distinguishes
+  user_provided / measurement / literature / library / default /
+  inferred / UNSOURCED, with sentinel detection that respects
+  recorded sources (Fa=1.0 with `Fa_source='BCS II'` is not flagged
+  as silent fallback).
+- `validate_model()` now embeds the audit in its output, so a
+  successful validation surfaces silent-fallback / unsourced /
+  low-confidence breakdown before the user proceeds to simulate.
+- `add_absorption()` accepts `Fa_source`, `Fg_source`,
+  `Peff_source` kwargs (was: only `ka_source`). Allows tagging
+  legitimate Fa=1.0 / Fg=1.0 with a source so the audit doesn't
+  flag them as defaults.
+
+### Behavior
+- Tool count: 41 → 42 (added `audit_model_provenance`).
+- Verdict labels: `passed`, `passed-with-flags`, `failed-audit`.
+  Sections (a) silent-fallback / (b) low-confidence drivers /
+  (c) unsourced are always emitted, never omitted.
+
+### Verification
+- 45/45 fail-fast tests pass (was 40)
+- New cases: silent-fallback detection, PMID-source recognition,
+  vague-citation rejection, MCP tool registration, prompt content
+
+### Architecture summary (v1.7 → v2.0)
+The server now has TWO independent enforcement axes:
+
+  Input-time (schema + invariant):
+    schema → unit → range → discriminated union → token gate →
+    physiology mass-balance → post-sim dose recovery
+
+  Output-time (audit):
+    provenance_audit prompt + audit_model_provenance tool +
+    inline audit at validate_model
+
+A model must pass both axes to be reportable as a prediction.
+
 ## v1.9 (2026-04-22) — Five invariants in MCP system prompt
 
 The FastMCP `instructions` field now declares five hard invariants

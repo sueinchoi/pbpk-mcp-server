@@ -165,15 +165,37 @@ suite (`tests/test_silent_fallback.py`, run via `python -m
 tests.test_silent_fallback`) covers 38 specific failure modes
 across these layers.
 
-### Tool surface (41 total)
+### Provenance audit (output-time, separate layer)
+
+`prompts/provenance_audit.py` adds a second, output-time enforcement
+axis. Where input validation rejects malformed inputs, the audit
+detects outputs that *look* reasonable but were assembled from
+defaults the LLM didn't notice. Two artifacts:
+
+- **`provenance_audit` MCP prompt** — generic auditor template;
+  apply to any PBPK model output. Forces per-parameter rows with
+  source type / citation / confidence; refuses verdict `passed`
+  unless every row has a verifiable source.
+- **`audit_model_provenance(compound_id)` MCP tool** — deterministic
+  audit from session state. Tags each parameter as
+  user_provided / measurement / literature / library / default /
+  inferred / UNSOURCED; sentinel detection respects recorded
+  sources (Fa=1.0 with `Fa_source='BCS II'` is not flagged).
+
+Verdict labels: `passed` / `passed-with-flags` / `failed-audit`.
+The audit is automatically embedded in every `validate_model()`
+response, so users see it before simulating.
+
+### Tool surface (42 total)
 
 - **30 legacy PBPK tools** — flat-parameter API kept for
-  back-compat. `run_pbpk_simulation` now goes through schema
-  validation but accepts the same kwargs.
-- **9 session tools** — `register_compound`, `add_binding`,
+  back-compat. `run_pbpk_simulation` goes through schema validation
+  but accepts the same kwargs.
+- **10 session tools** — `register_compound`, `add_binding`,
   `add_clearance`, `add_absorption`, `add_transporters`,
   `select_model_structure`, `validate_model`, `simulate_validated`,
-  `session_summary`. Use these for fabrication-resistant workflows.
+  `session_summary`, `audit_model_provenance`. Use these for
+  fabrication-resistant workflows.
 - **2 citation tools** — `verify_citation`, `verify_citation_list`.
   Call before inserting any PMID/DOI into a Source field.
 

@@ -174,13 +174,22 @@ def add_clearance(compound_id: str, *, source: str,
 
 def add_absorption(compound_id: str, ka: float = 1.0, Fa: float = 1.0,
                    Fg: float = 1.0, Peff: Optional[float] = None,
-                   ka_source: Optional[str] = None) -> None:
+                   ka_source: Optional[str] = None,
+                   Fa_source: Optional[str] = None,
+                   Fg_source: Optional[str] = None,
+                   Peff_source: Optional[str] = None) -> None:
     from .invariants import check_compound_ranges, raise_on_violations
     raise_on_violations(check_compound_ranges(ka=ka, Fa=Fa, Fg=Fg, Peff=Peff))
     d = _get(compound_id)
     d.absorption = {"ka": ka, "Fa": Fa, "Fg": Fg, "Peff": Peff}
     if ka_source:
         d.sources["ka"] = ka_source
+    if Fa_source:
+        d.sources["Fa"] = Fa_source
+    if Fg_source:
+        d.sources["Fg"] = Fg_source
+    if Peff_source:
+        d.sources["Peff"] = Peff_source
 
 
 def add_transporters(compound_id: str, **transporter_pairs) -> None:

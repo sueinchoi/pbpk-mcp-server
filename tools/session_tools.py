@@ -117,17 +117,28 @@ def register_session_and_citation_tools(mcp: FastMCP):
         Fg: float = 1.0,
         Peff: Optional[float] = None,
         ka_source: str = "",
+        Fa_source: str = "",
+        Fg_source: str = "",
+        Peff_source: str = "",
     ) -> str:
         """
         Step 4 of the session workflow. Record absorption parameters.
 
-        Defaults (ka=1.0, Fa=1.0, Fg=1.0) trigger soft warnings at
-        validate_model(). Provide ka from oral C-t fit, Fa from BCS or
-        Caco-2 modeling, Fg from Yang Qgut model with measured Peff.
+        Defaults (ka=1.0, Fa=1.0, Fg=1.0) trigger silent-fallback
+        warnings unless a source is recorded. If you legitimately set
+        Fa=1.0 because the drug is BCS I/II well-absorbed, pass
+        Fa_source='BCS II + Caco-2 Papp ...' so the audit knows it
+        was a deliberate choice rather than a missing input.
+
+        Provide ka from oral C-t fit, Fa from BCS or Caco-2 modeling,
+        Fg from Yang Qgut model with measured Peff.
         """
         from core.session import add_absorption as _add
         _add(compound_id, ka=ka, Fa=Fa, Fg=Fg, Peff=Peff,
-             ka_source=ka_source or None)
+             ka_source=ka_source or None,
+             Fa_source=Fa_source or None,
+             Fg_source=Fg_source or None,
+             Peff_source=Peff_source or None)
         return f"absorption recorded for `{compound_id}`: ka={ka}, Fa={Fa}, Fg={Fg}"
 
     @mcp.tool()
@@ -209,6 +220,13 @@ def register_session_and_citation_tools(mcp: FastMCP):
         if rep.ok and rep.validation_token:
             lines.append(f"\n**validation_token**: `{rep.validation_token}`")
             lines.append(f"\nProceed with: `simulate_validated('{rep.validation_token}', dose_mg=..., route='oral')`")
+            # Inline provenance audit at validation time — every successful
+            # validate_model surfaces the audit so the user sees the
+            # silent-fallback / unsourced / low-confidence breakdown
+            # before simulating, not after.
+            from prompts.provenance_audit import render_session_audit
+            lines.append("\n---\n")
+            lines.append(render_session_audit(compound_id))
         return "\n".join(lines)
 
     @mcp.tool()
@@ -407,6 +425,33 @@ def register_session_and_citation_tools(mcp: FastMCP):
             pass
 
         return "\n".join(out)
+
+    @mcp.tool()
+    def audit_model_provenance(compound_id: str) -> str:
+        """
+        Generate a deterministic provenance audit for a session-built
+        PBPK model. Output is a table with one row per parameter
+        (Parameter | Value | Unit | Source type | Source citation |
+        Confidence | Note), plus three explicit lists:
+
+          (a) silent-fallback parameters (server defaults triggered)
+          (b) low-confidence parameters that drive model output
+          (c) unsourced parameters (no PMID/DOI/measurement)
+
+        And a final verdict: `passed`, `passed-with-flags`, or
+        `failed-audit`.
+
+        This is a SEPARATE LAYER from input-time schema validation.
+        Input validation catches malformed inputs; this audit catches
+        the opposite failure — outputs that look reasonable but were
+        assembled from defaults the LLM didn't realize it was using.
+
+        For a compound built via the legacy run_pbpk_simulation flat
+        tool, no session exists — use the `provenance_audit` MCP
+        prompt instead and apply it manually.
+        """
+        from prompts.provenance_audit import render_session_audit
+        return render_session_audit(compound_id)
 
     @mcp.tool()
     def session_summary(compound_id: str) -> str:

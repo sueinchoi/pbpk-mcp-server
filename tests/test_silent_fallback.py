@@ -304,10 +304,10 @@ def t():
     )
     assert "⚠️" not in out, f"unexpected warning:\n{out}"
 
-@test("41 tools registered (30 PBPK + 9 session + 2 citation)")
+@test("42 tools registered (30 PBPK + 10 session/audit + 2 citation)")
 def t():
     tools = _server()
-    assert len(tools) == 41, f"expected 41 tools, got {len(tools)}"
+    assert len(tools) == 42, f"expected 42 tools, got {len(tools)}"
 
 # ============================================================
 # Section 6: Determinism — same input → same NCA result
@@ -547,6 +547,87 @@ def t():
     }
     missing = expected - set(tools.keys())
     assert not missing, f"missing tools: {missing}"
+
+# ============================================================
+# Section 11: Provenance audit (output-time layer)
+# ============================================================
+print("\n## Provenance audit")
+
+@test("audit detects silent fallback when no sources recorded")
+def t():
+    from core.session import (
+        register_compound, add_binding, add_clearance,
+        add_absorption, select_model_structure,
+    )
+    from prompts.provenance_audit import render_session_audit
+    cid = register_compound("AuditTest1", mw=300.0, logP=2.0,
+                            pKa=7.0, compound_type="neutral")
+    add_binding(cid, fu_p=0.5, R_bp=1.0)
+    add_clearance(cid, source="direct", CL_int=10.0)
+    add_absorption(cid, ka=1.0, Fa=1.0, Fg=1.0)
+    select_model_structure(cid)
+    audit = render_session_audit(cid)
+    assert ("failed-audit" in audit) or ("passed-with-flags" in audit), \
+        "audit should flag missing sources / sentinel defaults"
+    assert "⚠️" in audit
+
+@test("audit recognizes recorded PMID source")
+def t():
+    from core.session import (
+        register_compound, add_binding, add_clearance,
+        add_absorption, select_model_structure,
+    )
+    from prompts.provenance_audit import render_session_audit
+    cid = register_compound("AuditTest2", mw=296.15, logP=4.51,
+                            pKa=4.0, compound_type="acid",
+                            mw_source="PubChem CID 3033",
+                            logP_source="PMID:9351894")
+    add_binding(cid, fu_p=0.005, R_bp=0.55,
+                fu_p_source="PMID:9106794",
+                R_bp_source="user_provided measurement")
+    add_clearance(cid, source="hepatocyte", CLint_vitro_hep=120.0,
+                  clearance_source_citation="user_provided in_house_measurement")
+    add_absorption(cid, ka=2.0, Fa=1.0, Fg=0.76,
+                   ka_source="PMID:23456789",
+                   Fa_source="BCS II + Caco-2 Papp 30e-6 cm/s",
+                   Fg_source="Yang Qgut PMID:17400759")
+    select_model_structure(cid, kp_method="schmitt")
+    audit = render_session_audit(cid)
+    section_a = audit.split("(a)")[1].split("(b)")[0] if "(a)" in audit else ""
+    assert "no defaults triggered" in section_a, \
+        f"audit should not flag well-sourced as defaults:\n{section_a}"
+
+@test("audit refuses to invent citations — UNSOURCED for vague labels")
+def t():
+    from core.session import (
+        register_compound, add_binding, add_clearance,
+        add_absorption, select_model_structure,
+    )
+    from prompts.provenance_audit import render_session_audit
+    cid = register_compound("AuditTest3", mw=300.0, logP=2.0,
+                            pKa=7.0, compound_type="neutral",
+                            mw_source="literature value")
+    add_binding(cid, fu_p=0.3, R_bp=0.8, fu_p_source="typical")
+    add_clearance(cid, source="direct", CL_int=10.0)
+    add_absorption(cid, ka=2.0)
+    select_model_structure(cid)
+    audit = render_session_audit(cid)
+    assert "UNSOURCED" in audit, \
+        "vague 'literature value'/'typical' should be flagged UNSOURCED"
+
+@test("audit_model_provenance MCP tool registered")
+def t():
+    tools = _server()
+    assert "audit_model_provenance" in tools
+
+@test("provenance_audit MCP prompt content valid")
+def t():
+    from prompts.provenance_audit import get_audit_prompt
+    p = get_audit_prompt()
+    assert "Source type" in p
+    assert "default" in p
+    assert "UNSOURCED" in p
+    assert "fabricat" in p.lower() or "invent" in p.lower()
 
 # ============================================================
 # Summary

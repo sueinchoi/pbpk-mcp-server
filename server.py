@@ -61,7 +61,7 @@ def get_status() -> str:
     counts = count_all_parameters()
     return f"""# PBPK MCP Server v1.8
 
-## Tools: 41 (30 PBPK + 9 session + 2 citation) | Parameters: {counts['total']} configurable
+## Tools: 42 (30 PBPK + 10 session/audit + 2 citation) | Parameters: {counts['total']} configurable
 - Tier 1 (Required): {counts['tier1_required']} params
 - Tier 2 (Recommended): {counts['tier2_recommended']} params
 - Tier 3 (Optional): {counts['tier3_optional']} params
@@ -84,6 +84,29 @@ def get_status() -> str:
 def pbpk_setup_guide() -> str:
     """Interactive guide for setting up a new PBPK simulation."""
     return format_user_guide()
+
+
+@mcp.prompt()
+def provenance_audit() -> str:
+    """Apply this audit to ANY PBPK model output.
+
+    A separate output-time layer that catches silent fallback the
+    input-time schema cannot — defaults the LLM didn't realize it
+    used, citations the LLM may have fabricated, vague "literature
+    value" without identifier. Forces a per-parameter row with
+    source type, citation, and confidence; refuses to summarize a
+    model as validated unless every row has a verifiable source.
+
+    Use this prompt:
+      1. Whenever a model's results are about to be reported as a
+         prediction (regulatory submission, publication, decision-
+         support).
+      2. After receiving a model from an LLM you did not run yourself.
+      3. As a periodic sanity check on long sessions where parameters
+         may have accumulated implicitly.
+    """
+    from prompts.provenance_audit import get_audit_prompt
+    return get_audit_prompt()
 
 
 @mcp.prompt()
