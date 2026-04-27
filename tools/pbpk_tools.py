@@ -112,6 +112,10 @@ from core.hepatic_models import (
     ddi_induction,
     ddi_net_effect,
 )
+from core.validation import (
+    validate_run_pbpk_inputs,
+    format_warnings_block,
+)
 
 
 def register_pbpk_tools(mcp: FastMCP):
@@ -384,6 +388,17 @@ def register_pbpk_tools(mcp: FastMCP):
         cl_int_resolved = CL_int
         ivive_info = ""
 
+        # Pre-IVIVE: hard validation of clearance_source vs provided inputs
+        # (raises with actionable message before any computation happens)
+        from core.validation import (
+            validate_kp_method, validate_clearance_source_mismatch,
+        )
+        validate_kp_method(kp_method)
+        validate_clearance_source_mismatch(
+            clearance_source, CL_int, CLint_vitro_hlm,
+            CLint_vitro_hep, CLint_per_cyp,
+        )
+
         if clearance_source == "hlm" and CLint_vitro_hlm is not None:
             from core.ivive import scale_microsomal_clint
             ivive_r = scale_microsomal_clint(CLint_vitro_hlm, logP=logP,
@@ -473,12 +488,39 @@ def register_pbpk_tools(mcp: FastMCP):
                 f"accurately simulated with `kp_method=\"{compound.recommended_kp_method}\"` "
                 f"(rationale in `pbpk_help`). Using R&R default may over/under-predict Vss.\n"
             )
-        try:
-            kp_method_enum = KpMethod(kp_method)
-            if kp_method_enum != KpMethod.RODGERS_ROWLAND:
-                kp_override = predict_kp_all(compound, kp_method_enum)
-        except ValueError:
-            pass  # fall back to default R&R
+        # kp_method already validated above — direct enum construction is safe
+        kp_method_enum = KpMethod(kp_method)
+        if kp_method_enum != KpMethod.RODGERS_ROWLAND:
+            kp_override = predict_kp_all(compound, kp_method_enum)
+
+        # --- Soft warnings: collect AFTER cl_int_resolved is finalized ---
+        in_library_match = bool(name and name.lower() in COMPOUND_LIBRARY)
+        user_overrides = {}
+        if in_library_match:
+            # Detect which custom params the user supplied that the
+            # library lookup will ignore (uses tool-default sentinels)
+            override_candidates = {
+                "logP": (logP, 0.0), "pKa": (pKa, 7.0), "fu_p": (fu_p, 1.0),
+                "R_bp": (R_bp, 1.0), "mw": (mw, 300.0),
+                "ka": (ka, 1.0), "Fa": (Fa, 1.0), "Fg": (Fg, 1.0),
+                "CL_int": (CL_int, 0.0), "CL_renal": (CL_renal, 0.0),
+            }
+            user_overrides = {
+                k: v for k, v in override_candidates.items() if v[0] != v[1]
+            }
+        soft_warnings = validate_run_pbpk_inputs(
+            name=name, library=COMPOUND_LIBRARY,
+            distribution_model=distribution_model, kp_method=kp_method,
+            clearance_source=clearance_source,
+            CL_int=CL_int, CLint_vitro_hlm=CLint_vitro_hlm,
+            CLint_vitro_hep=CLint_vitro_hep, CLint_per_cyp=CLint_per_cyp,
+            CL_renal=CL_renal,
+            has_transporters=bool(transporter_dict),
+            fu_p=compound.fu_p, R_bp=compound.R_bp,
+            cl_int_resolved=cl_int_resolved,
+            compound_type=compound.compound_type.value,
+            user_overrides=user_overrides,
+        )
 
         # --- Build model (with transporters if provided) ---
         model = PBPKModel(compound, phys,
@@ -549,6 +591,9 @@ def register_pbpk_tools(mcp: FastMCP):
         # Format output
         output = []
         output.append(f"# PBPK Simulation — {compound.name}")
+        # Surface input warnings prominently, immediately after the title
+        if soft_warnings:
+            output.append(format_warnings_block(soft_warnings))
         output.append(f"\n**Dose:** {result.dose_info}")
         output.append(f"**Subject:** {body_weight} kg {sex}, {age}y")
         output.append(f"**Model:** {distribution_model.replace('_', '-')}")

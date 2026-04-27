@@ -112,6 +112,33 @@ This rule was added after the Diclofenac case study where blindly
 applying defaults gave Vss off by 10× (Berezhkovskiy) or 0.5× (R&R)
 even though CL was right.
 
+## Input validation (`core/validation.py`)
+
+`run_pbpk_simulation` rejects or warns on the following silent-failure
+patterns. When adding new tools or refactoring, preserve these checks
+or factor them through the same module:
+
+**Hard errors (raise ValueError before any computation):**
+- Invalid `kp_method` string (suggests closest match — `poulin-theil` →
+  `poulin_theil`)
+- `clearance_source` mismatched against the IVIVE field provided
+  (e.g. `clearance_source="hlm"` with only `CLint_vitro_hep` given)
+- Invalid `distribution_model` or `route` enum
+
+**Soft warnings (run simulation, surface in output `⚠️` block):**
+- Library compound matched but user supplied custom physicochemical
+  params — the library values win, custom values are silently dropped.
+  Tell the user to use a non-library `name=` or edit `COMPOUND_LIBRARY`.
+- Transporter parameters provided with default `perfusion_limited`
+  distribution model (transporters only fire in `permeability_limited`).
+- Sentinel defaults (`fu_p=1.0`, `R_bp=1.0`) on a custom compound.
+- Zero hepatic + zero renal clearance.
+- `compound_type="neutral"` with `fu_p<0.01` (almost certainly an acid).
+
+The split between hard errors and soft warnings is intentional: hard
+errors fire when the simulation cannot be physically meaningful;
+warnings fire when it runs but probably isn't what the user intended.
+
 ## Conventions specific to this codebase
 
 - **MCP parameter naming is load-bearing.** FastMCP silently drops unknown kwargs, so misnamed parameters fall back to defaults with no warning. The canonical names are:
