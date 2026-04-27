@@ -21,7 +21,28 @@ I'll help you run a whole-body PBPK simulation. Let me collect the necessary inf
 3. **Full parameter set** → You have everything ready
 4. **PK-Sim model file** → Import from .pkml/.xml
 
-Which scenario fits you?"""
+Which scenario fits you?
+
+## Before I start: measurement audit
+
+For the parameters below, **a measured value (when available) is always
+preferred over a literature default or model prediction.** I will ask
+you about each one explicitly. If you don't have a measurement, I will
+fall back to literature consensus or in silico prediction and mark the
+source clearly in the final parameter table (M / L / P).
+
+**Priority-1 (most impactful — predictions diverge widely):**
+- `fu_hep` (hepatocyte unbound fraction) — RED assay; affects CL by ≥2×
+- `fu_inc` (HLM unbound fraction) — RED assay
+- `R_bp` (blood:plasma ratio) — Bp/p assay; affects all Kp_blood values
+- `Peff` or Caco-2 `Papp` — Caco-2 / PAMPA; determines Fg
+
+**Priority-2:**
+- Tissue Kp (rat tissue distribution) — supersedes any Kp method
+- `ka` (absorption rate) — from oral concentration-time data
+- EHC parameters (`CL_bile`, deconjugation rate, ...) — from bile-cannulation studies
+
+Tell me which of these you have measured for your compound."""
 
 
 TIER1_REQUIRED = {

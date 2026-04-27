@@ -429,6 +429,12 @@ distribution with tuned kidney OCT2 / MATE1 parameters.
 ## Recommended workflow
 
 ```
+0. **Measurement audit** — for each Priority-1 parameter (fu_hep, fu_inc,
+   R_bp, Caco-2 Papp / Peff) and Priority-2 parameter (tissue Kp, ka,
+   EHC params), ASK the user whether a measured value exists. Use it
+   if so; otherwise fall back to literature consensus or model
+   prediction, and tag the source as M / L / P in the final table.
+     ↓
 1. [drug_properties] Look up drug information
      ↓
 2. [compare_kp_methods] Choose a Kp method
@@ -446,6 +452,14 @@ distribution with tuned kidney OCT2 / MATE1 parameters.
      ↓
 7. [fit_to_observed] Fine-tune against observed data
 ```
+
+### Why Step 0 matters
+
+Predictions for `fu_hep` (Austin equation), `fu_inc`, and `R_bp`
+(Rodgers-Rowland from RBC partitioning) can differ from measurement by
+2-4× at logP > 4 or fu_p < 0.01. A 2× error in `fu_hep` propagates
+directly to a 2× error in CL. Always prefer a measured value, and be
+explicit when you fall back to prediction.
 
 ---
 

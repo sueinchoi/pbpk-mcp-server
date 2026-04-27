@@ -84,6 +84,34 @@ Mass conservation is the primary correctness check. Two historical bugs to be aw
 
 Lazy-loaded SQLite DB (29 MB, GPLv2 — see NOTICE.md). Provides 38K population parameter distributions, 294 ontogeny points, 38 transporters. Don't bundle data into Python imports; query through this module.
 
+## Modeling workflow rule (MANDATORY)
+
+**Before building any PBPK model, audit which parameters the user has
+measured.** Do not silently fall back to predictions. The Priority-1
+parameters where measurement vs. prediction can differ by ≥2× are:
+
+- `fu_hep` / `fu_inc` (hepatocyte / HLM unbound fraction) — Austin equation
+  prediction can be 2-4× off at logP > 4. Measured value (rapid equilibrium
+  dialysis) is strongly preferred.
+- `R_bp` (blood:plasma ratio) — drives all Kp_blood values.
+- Caco-2 `Papp` or human `Peff` — determines `Fg` via Yang Qgut model.
+
+Priority-2 parameters where measurement supersedes any in silico method:
+
+- Tissue Kp (rat distribution data) — replaces R&R/Schmitt/PT prediction
+- `ka` — fit from oral C-t data
+- EHC parameters — from bile cannulation studies
+
+**For each parameter, ask the user explicitly.** Mark each value in the
+final summary as **M** (measured), **L** (literature consensus), or
+**P** (predicted). The `pbpk_modeling_guide` MCP prompt and the
+`WELCOME_PROMPT` in `prompts/user_guide.py` enforce this workflow at
+runtime — do not regress them when refactoring.
+
+This rule was added after the Diclofenac case study where blindly
+applying defaults gave Vss off by 10× (Berezhkovskiy) or 0.5× (R&R)
+even though CL was right.
+
 ## Conventions specific to this codebase
 
 - **MCP parameter naming is load-bearing.** FastMCP silently drops unknown kwargs, so misnamed parameters fall back to defaults with no warning. The canonical names are:

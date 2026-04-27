@@ -65,14 +65,45 @@ def pbpk_modeling_guide() -> str:
    - Drug name + in vitro data → collect CLint, fm, Peff
    - Full parameter set → proceed directly
 
-2. COLLECT in this order:
+2. **CRITICAL — measurement audit BEFORE modeling.** For each parameter
+   below, EXPLICITLY ASK the user whether they have a measured value.
+   Only fall back to literature consensus or model prediction if the
+   user confirms no measurement is available, and ALWAYS state which
+   source you used (measured / literature / predicted) in the final
+   parameter table.
+
+   Priority-1 parameters (most impactful, predictions diverge widely):
+   • fu_hep / fu_inc — hepatocyte/HLM unbound fraction
+       Measured: rapid equilibrium dialysis (RED) in incubation matrix
+       Fallback: Austin 2002 from logP (can be 2-4× off at logP > 4)
+       Why critical: CLint_in_vivo scales as 1/fu_inc — 2× error in
+       fu_inc gives 2× error in CL prediction.
+   • R_bp (blood:plasma ratio)
+       Measured: small-volume Bp/p assay (simple, ~1 day)
+       Fallback: Rodgers-Rowland prediction from RBC partitioning
+       Why critical: drives all Kp_blood values and circulation kinetics.
+   • Caco-2 Papp or human Peff
+       Measured: Caco-2 transwell or PAMPA
+       Fallback: assumed value or PSA/MW-based prediction
+       Why critical: determines Fg via Yang Qgut model.
+
+   Priority-2 parameters:
+   • Tissue Kp (rat tissue distribution) — supersedes any Kp method
+   • ka (absorption rate) — fit from oral C-t data
+   • CL_bile / EHC parameters — from bile cannulation studies
+
+3. COLLECT in this order, marking each as M (measured) / L (literature) / P (predicted):
    a) Tier 1 (MUST HAVE): name, MW, dose, route
    b) Tier 2 (SHOULD HAVE): logP, pKa, fu_p, compound_type, clearance source
-   c) Auto-predict what's missing: R_bp, Kp, fu_inc, GFR, gut CLint
+   c) Tier 3 (asked individually in Step 2): fu_hep, fu_inc, R_bp, Peff,
+      tissue Kp, ka, EHC params
+   d) Auto-predict only what the user confirms is unavailable
 
-3. CLEARANCE — ask which data they have:
+4. CLEARANCE — ask which data they have:
    - HLM CLint (µL/min/mg) → use clearance_source="hlm"
    - Hepatocyte CLint → use clearance_source="hepatocyte"
+       PREFERRED for drugs with significant non-CYP metabolism (UGT,
+       SULT, esterase) — HLM misses these by definition.
    - rCYP CLint per enzyme → use clearance_source="rcyp"
    - Clinical CL → use direct CL_int
 
