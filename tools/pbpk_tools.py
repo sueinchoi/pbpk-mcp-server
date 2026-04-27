@@ -90,7 +90,7 @@ from core.species import (
 from core.disease_states import (
     CKDStage, ChildPugh, format_disease_profile,
 )
-from core.sensitivity import compute_gof
+from core.sensitivity import compute_gof, local_sensitivity
 from core.time_varying import (
     format_pregnancy_profile,
     circadian_enzyme_factor,
@@ -1819,6 +1819,196 @@ def register_pbpk_tools(mcp: FastMCP):
             lines.append("\n⚠️ **Do NOT use this prediction for human dosing.** "
                          "The Rule of Exponents flagged this case as unreliable.")
         return "\n".join(lines)
+
+    # ----------------------------------------------------------------
+    # Local sensitivity analysis (one-at-a-time)
+    # ----------------------------------------------------------------
+
+    @mcp.tool()
+    def sensitivity_analysis(
+        name: str = "",
+        # Custom compound (used if `name` is not in library)
+        logP: float = 0.0,
+        pKa: float = 7.0,
+        fu_p: float = 1.0,
+        compound_type: str = "neutral",
+        R_bp: float = 1.0,
+        mw: float = 300.0,
+        ka: float = 1.0,
+        Fa: float = 1.0,
+        Fg: float = 1.0,
+        CL_int: float = 0.0,
+        CL_renal: float = 0.0,
+        # Dosing for the simulation that drives sensitivity
+        dose_mg: float = 100.0,
+        route: str = "oral",
+        duration_h: float = 24.0,
+        body_weight: float = 73.0,
+        sex: str = "male",
+        age: float = 30.0,
+        kp_method: str = "rodgers_rowland",
+        # Which parameters to perturb + which PK metric to track
+        parameters: str = "CL_int,fu_p,R_bp,ka,Fa,Fg",
+        pk_metric: str = "AUC_0_inf",
+        perturbation: float = 0.05,
+    ) -> str:
+        """
+        One-at-a-time (OAT) local sensitivity analysis.
+
+        For each parameter in `parameters`, perturb by ±`perturbation`
+        fraction (default 5%) and measure the central-difference
+        normalized sensitivity of the chosen PK metric:
+
+            S = (ΔPK / PK_base) / (Δp / p_base)
+
+        Magnitude classification (FDA/EMA convention):
+          |S| ≥ 1.0 → "high"        (proportional driver)
+          0.5–1.0   → "moderate"
+          0.1–0.5   → "low"
+          < 0.1     → "negligible"
+
+        ANTI-FABRICATION: do not run sensitivity on a sentinel-default
+        compound — the result will be physically meaningless. Provide
+        either a library `name` or explicit physchem (logP, pKa, fu_p,
+        mw at minimum).
+
+        Args:
+            name: Library compound name OR empty for custom.
+            (other physchem args same as run_pbpk_simulation)
+            parameters: Comma-separated list of parameter names to
+                perturb. Allowed: CL_int, CL_renal, fu_p, R_bp, ka,
+                Fa, Fg, logP, pKa, mw. Default: the six common drivers.
+            pk_metric: Which PK metric to track. One of:
+                AUC_0_inf, AUC_0_t, Cmax, t_half, CL_F, Vss, Tmax, MRT.
+            perturbation: Fractional perturbation (0.01-0.20 typical).
+
+        Returns:
+            Markdown table ranked by |S|, with magnitude classification
+            and a "drivers" summary listing the parameters that
+            dominate the prediction.
+
+        Reference:
+            McNally K et al. Front Pharmacol 2020;11:1-15.
+        """
+        # --- Validate inputs ---
+        from core.validation import (
+            require_compound_input, validate_kp_method,
+        )
+        from core.invariants import raise_on_violations, check_compound_ranges
+        require_compound_input(
+            name=name, library=COMPOUND_LIBRARY,
+            logP=logP, pKa=pKa, fu_p=fu_p, mw=mw,
+            tool_name="sensitivity_analysis",
+        )
+        validate_kp_method(kp_method)
+        if not (0.005 <= perturbation <= 0.50):
+            raise ValueError(
+                f"perturbation={perturbation} out of range [0.005, 0.50]. "
+                f"Typical values are 0.01-0.10. Smaller is more local; "
+                f"larger leaves the linear regime."
+            )
+
+        # --- Build base compound ---
+        name = name or ""
+        if name.lower() in COMPOUND_LIBRARY:
+            base_compound = COMPOUND_LIBRARY[name.lower()]
+        else:
+            base_compound = CompoundSpec(
+                name=name or "Custom", mw=mw, logP=logP, pKa=pKa,
+                fu_p=fu_p, compound_type=CompoundType(compound_type),
+                R_bp=R_bp, ka=ka, Fa=Fa, Fg=Fg,
+                CL_int=CL_int, CL_renal=CL_renal,
+            )
+
+        # --- Validate which parameters can be perturbed ---
+        ALLOWED_PARAMS = {
+            "CL_int", "CL_renal", "fu_p", "R_bp", "ka", "Fa", "Fg",
+            "logP", "pKa", "mw",
+        }
+        ALLOWED_METRICS = {
+            "AUC_0_inf", "AUC_0_t", "Cmax", "t_half", "CL_F", "Vss",
+            "Tmax", "MRT",
+        }
+        param_list = [p.strip() for p in parameters.split(",") if p.strip()]
+        bad_params = [p for p in param_list if p not in ALLOWED_PARAMS]
+        if bad_params:
+            raise ValueError(
+                f"Unknown parameter(s) {bad_params}. Allowed: "
+                f"{sorted(ALLOWED_PARAMS)}."
+            )
+        if pk_metric not in ALLOWED_METRICS:
+            raise ValueError(
+                f"Unknown pk_metric='{pk_metric}'. Allowed: "
+                f"{sorted(ALLOWED_METRICS)}."
+            )
+
+        # --- Build base parameter dict for OAT ---
+        base_params = {p: getattr(base_compound, p) for p in param_list}
+        # Reject zero-base parameters (would make ratio undefined)
+        zero_params = [p for p, v in base_params.items() if v == 0]
+        if zero_params:
+            raise ValueError(
+                f"Parameter(s) {zero_params} have base value 0; "
+                f"normalized sensitivity is undefined when the base is 0. "
+                f"Either set them to a non-zero value or remove from "
+                f"the perturbation list."
+            )
+
+        # --- Build simulate_fn closure that rebuilds compound and runs sim ---
+        phys = get_physiology(body_weight=body_weight, sex=Sex(sex),
+                              age_years=age)
+        kp_method_enum = KpMethod(kp_method)
+
+        def _simulate(params_dict: dict):
+            # Construct a compound with the perturbed values
+            kw = {
+                "name": base_compound.name,
+                "mw": base_compound.mw, "logP": base_compound.logP,
+                "pKa": base_compound.pKa, "fu_p": base_compound.fu_p,
+                "compound_type": base_compound.compound_type,
+                "R_bp": base_compound.R_bp,
+                "ka": base_compound.ka, "Fa": base_compound.Fa,
+                "Fg": base_compound.Fg,
+                "CL_int": base_compound.CL_int,
+                "CL_renal": base_compound.CL_renal,
+            }
+            kw.update(params_dict)
+            c = CompoundSpec(**kw)
+            kp_override = (predict_kp_all(c, kp_method_enum)
+                           if kp_method_enum != KpMethod.RODGERS_ROWLAND
+                           else None)
+            model = PBPKModel(c, phys, kp_override=kp_override)
+            dosing = DosingProtocol(dose_mg=dose_mg, route=Route(route))
+            cfg = SimulationConfig(duration_h=duration_h, n_timepoints=500)
+            r = model.simulate(dosing, cfg)
+            return calculate_pk_parameters(
+                r.time, r.venous_plasma,
+                dose_mg=dose_mg,
+                is_iv=route in ("iv_bolus", "iv_infusion"),
+            )
+
+        # --- Run sensitivity ---
+        result = local_sensitivity(
+            simulate_fn=_simulate,
+            base_params=base_params,
+            param_names=param_list,
+            pk_metric=pk_metric,
+            perturbation=perturbation,
+        )
+
+        # --- Format output with method header + provenance ---
+        out = [
+            f"# Sensitivity Analysis — {base_compound.name}\n",
+            f"**Method**: One-at-a-time (OAT) local sensitivity, "
+            f"central-difference normalized.  ",
+            f"**Compound**: {base_compound.name} "
+            f"({'library' if name and name.lower() in COMPOUND_LIBRARY else 'custom'})  ",
+            f"**Dose / route / duration**: {dose_mg} mg / {route} / {duration_h} h  ",
+            f"**Subject**: {body_weight} kg {sex}, {age}y  ",
+            f"**Kp method**: {kp_method}\n",
+            result.to_markdown(),
+        ]
+        return "\n".join(out)
 
     # ----------------------------------------------------------------
     # Disease states

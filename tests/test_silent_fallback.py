@@ -309,10 +309,10 @@ def t():
     )
     assert "⚠️" not in out, f"unexpected warning:\n{out}"
 
-@test("45 tools registered (33 PBPK + 10 session/audit + 2 citation)")
+@test("46 tools registered (34 PBPK + 10 session/audit + 2 citation)")
 def t():
     tools = _server()
-    assert len(tools) == 45, f"expected 45 tools, got {len(tools)}"
+    assert len(tools) == 46, f"expected 46 tools, got {len(tools)}"
 
 # ============================================================
 # Section 6: Determinism — same input → same NCA result
@@ -906,6 +906,70 @@ def t():
             species_data_csv="hamster:0.01:0.1, rat:0.05:0.25, dog:1.0:10",
         ),
         ValueError, "Unknown species",
+    )
+
+# --- Sensitivity analysis tests ---
+@test("sensitivity_analysis on midazolam — CL_int and fu_p are top drivers")
+def t():
+    tools = _server()
+    out = tools["sensitivity_analysis"].fn(
+        name="midazolam", dose_mg=7.5, route="oral",
+        duration_h=24.0, body_weight=70.0, sex="male", age=35.0,
+        pk_metric="AUC_0_inf", perturbation=0.05,
+    )
+    assert "Local Sensitivity" in out
+    assert "Drivers" in out or "drivers" in out
+    # CL_int should rank high (proportional to AUC)
+    assert "CL_int" in out and "fu_p" in out
+    assert "high" in out or "moderate" in out
+
+@test("sensitivity_analysis with no compound info raises")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["sensitivity_analysis"].fn(),
+        ValueError, "library compound name",
+    )
+
+@test("sensitivity_analysis rejects unknown parameter")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["sensitivity_analysis"].fn(
+            name="midazolam", parameters="CL_int,unknown_param",
+        ),
+        ValueError, "Unknown parameter",
+    )
+
+@test("sensitivity_analysis rejects unknown PK metric")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["sensitivity_analysis"].fn(
+            name="midazolam", pk_metric="not_a_metric",
+        ),
+        ValueError, "pk_metric",
+    )
+
+@test("sensitivity_analysis rejects out-of-range perturbation")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["sensitivity_analysis"].fn(
+            name="midazolam", perturbation=0.99,
+        ),
+        ValueError, "perturbation",
+    )
+
+@test("sensitivity_analysis rejects zero-base parameters")
+def t():
+    tools = _server()
+    # Midazolam has CL_renal=0 by default; perturbing it would be ill-defined
+    expect_raises(
+        lambda: tools["sensitivity_analysis"].fn(
+            name="midazolam", parameters="CL_renal",
+        ),
+        ValueError, "base value 0",
     )
 
 # ============================================================

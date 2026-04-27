@@ -20,28 +20,77 @@ from scipy.optimize import minimize, differential_evolution
 # Local Sensitivity Analysis (OAT)
 # ===================================================================
 
+def _classify_magnitude(sens: float) -> str:
+    """Classify normalized sensitivity by absolute value (FDA/EMA convention).
+
+    - |S| ≥ 1.0  : "high"   — proportional or super-proportional sensitivity
+    - 0.5 ≤ |S| < 1.0 : "moderate"
+    - 0.1 ≤ |S| < 0.5 : "low"
+    - |S| < 0.1  : "negligible"
+    """
+    a = abs(sens)
+    if a >= 1.0:
+        return "high"
+    if a >= 0.5:
+        return "moderate"
+    if a >= 0.1:
+        return "low"
+    return "negligible"
+
+
 @dataclass
 class SensitivityResult:
     """Result of local sensitivity analysis."""
     param_names: list[str]
-    sensitivities: dict[str, float]   # param -> normalized sensitivity
-    pk_metric: str                     # which PK metric was analyzed
+    sensitivities: dict[str, float]    # param -> normalized sensitivity
+    pk_metric: str                      # which PK metric was analyzed
+    pk_base_value: float = 0.0          # baseline PK metric value
+    perturbation: float = 0.05          # fractional perturbation used
+
+    def drivers(self) -> list[str]:
+        """Parameters with |S| >= 0.5 (moderate or higher)."""
+        return [p for p, s in self.sensitivities.items() if abs(s) >= 0.5]
 
     def to_markdown(self) -> str:
         lines = [
-            f"## Sensitivity Analysis — {self.pk_metric}\n",
-            "| Parameter | Normalized Sensitivity | Rank |",
-            "|-----------|----------------------|------|",
+            f"## Local Sensitivity Analysis — {self.pk_metric}\n",
+            f"**Baseline {self.pk_metric}**: {self.pk_base_value:.4g}  ",
+            f"**Perturbation**: ±{self.perturbation:.0%} (one-at-a-time)\n",
+            "| Rank | Parameter | Normalized S | Magnitude | Direction |",
+            "|---|---|---|---|---|",
         ]
         sorted_params = sorted(
             self.sensitivities.items(), key=lambda x: abs(x[1]), reverse=True
         )
         for rank, (param, sens) in enumerate(sorted_params, 1):
-            direction = "+" if sens > 0 else "-"
-            lines.append(f"| {param} | {direction}{abs(sens):.3f} | {rank} |")
-        lines.append(
-            "\n*Normalized: fractional change in PK / fractional change in parameter*"
-        )
+            magnitude = _classify_magnitude(sens)
+            direction = "↑" if sens > 0 else ("↓" if sens < 0 else "·")
+            lines.append(
+                f"| {rank} | `{param}` | {sens:+.3f} | {magnitude} | {direction} |"
+            )
+
+        lines.append("")
+        lines.append("**Normalized sensitivity**: "
+                     "(ΔPK / PK_base) / (Δparam / param_base) — "
+                     "central-difference, dimensionless. "
+                     "S = +1 means a 1% increase in parameter gives a 1% "
+                     "increase in PK metric.")
+        lines.append("")
+        lines.append("**Interpretation thresholds** (FDA/EMA "
+                     "convention): |S| ≥ 1.0 high · 0.5-1.0 moderate · "
+                     "0.1-0.5 low · < 0.1 negligible.")
+
+        drivers = self.drivers()
+        lines.append("")
+        if drivers:
+            lines.append(f"**Drivers** (|S| ≥ 0.5): "
+                         f"{', '.join('`' + d + '`' for d in drivers)} — "
+                         f"these parameters dominate the prediction. "
+                         f"Prioritize getting measured values for these.")
+        else:
+            lines.append("**No moderate-or-higher drivers** — the model is "
+                         "robust to small perturbations of the analyzed "
+                         "parameters in this regime.")
         return "\n".join(lines)
 
 
@@ -104,6 +153,8 @@ def local_sensitivity(
         param_names=param_names,
         sensitivities=sensitivities,
         pk_metric=pk_metric,
+        pk_base_value=float(pk_base_val),
+        perturbation=perturbation,
     )
 
 
