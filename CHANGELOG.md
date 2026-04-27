@@ -1,5 +1,58 @@
 # PBPK MCP Server — Changelog
 
+## v2.1 (2026-04-22) — Second-pass silent-fallback audit
+
+A focused audit of the remaining tool surface revealed six silent-
+fallback paths that survived v1.7-v2.0. All fixed.
+
+### Fixed silent-fallbacks
+1. **`absorption_model` enum was unenforced** — anything other than
+   "acat" silently fell back to "first_order", including typos.
+   `validate_absorption_model` now raises with the closest valid
+   option (`"first-order"` → suggests `"first_order"`).
+
+2. **Library `recommended_kp_method` was advisory only** — the
+   server emitted a Tip but still ran R&R. Library compounds with
+   a recommended method now USE that method by default (the user
+   is told explicitly via "Auto-selected Kp method" line). Pass
+   `kp_method="rodgers_rowland"` to opt out.
+
+3. **Malformed `fm_per_cyp` / `gut_cyp_clint` / `CLint_per_cyp`
+   silently dropped entries.** New `parse_cyp_dict()` strict parser
+   raises with the offending entry. Eager validation runs at tool
+   entry, so malformed input fails before the conditional branch
+   that uses it.
+
+4. **Default subject (73 kg male, 30 y) was applied silently.**
+   New `validate_subject_sentinel` detects the exact triple and
+   emits a soft warning. Pediatric / female / elderly studies must
+   set body_weight, sex, age explicitly.
+
+5. **Session GC produced a generic "unknown ID" error.** Now
+   distinguishes EXPIRED (was registered, then GC'd) from "never
+   existed", with rebuild guidance.
+
+6. **Citation NOT_FOUND records cached forever.** New 24h TTL on
+   NOT_FOUND so a transient API outage doesn't permanently mark a
+   real PMID as not found. VERIFIED records remain cached
+   indefinitely (PMIDs/DOIs are stable).
+
+### Hard-validation extended to other tools
+- **`run_dynamic_ddi`** — DDI mechanism prerequisites (reversible
+  → Ki required, mbi → KI+kinact required, induction → Emax+EC50
+  required), DDI parameter ranges, custom victim/perp physchem
+  ranges. Previously, a missing Ki silently produced a near-zero
+  inhibition.
+- **`run_population_pbpk`** — kp_method enum + custom-compound
+  range checks.
+
+### Verification
+- 57/57 fail-fast tests pass (was 45)
+- New cases: absorption_model typo, recommended_kp_method
+  auto-use, malformed CYP-dict rejection, sentinel-subject
+  warning, expired-vs-never-existed distinction, DDI mechanism
+  prerequisites, population-PBPK validation
+
 ## v2.0 (2026-04-22) — Provenance audit (output-time silent-fallback detection)
 
 Adds a separate audit layer that runs at output time, complementing

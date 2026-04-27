@@ -33,6 +33,81 @@ DISTRIBUTION_MODELS = ("perfusion_limited", "permeability_limited")
 
 ROUTES = ("oral", "iv_bolus", "iv_infusion")
 
+ABSORPTION_MODELS = ("first_order", "cat", "acat")
+
+
+def validate_absorption_model(absorption_model: str) -> str:
+    """Strict enum check for absorption_model. Previously, anything not
+    'acat' silently fell back to first_order — including typos."""
+    if absorption_model in ABSORPTION_MODELS:
+        return absorption_model
+    suggestions = [m for m in ABSORPTION_MODELS
+                   if m.replace("_", "") == absorption_model.replace("-", "").replace("_", "")]
+    suggestion_msg = f" Did you mean `{suggestions[0]}`?" if suggestions else ""
+    raise ValueError(
+        f"Invalid absorption_model='{absorption_model}'.{suggestion_msg} "
+        f"Valid options: {', '.join(ABSORPTION_MODELS)}. "
+        f"Use underscores, not hyphens."
+    )
+
+
+def parse_cyp_dict(s: str, *, parameter_name: str) -> dict[str, float]:
+    """
+    Parse a 'CYP3A4:0.5,CYP2C9:0.1' string into {CYP_NAME: float}.
+
+    Previously, malformed entries were silently skipped — a typo
+    (CYP3A4=0.5 with '=' instead of ':') silently dropped the gut
+    metabolism term. Now we raise with the offending entry.
+    """
+    if not s:
+        return {}
+    out: dict[str, float] = {}
+    bad: list[str] = []
+    for raw in s.split(","):
+        pair = raw.strip()
+        if not pair:
+            continue
+        if pair.count(":") != 1:
+            bad.append(pair)
+            continue
+        cyp, val = pair.split(":")
+        cyp = cyp.strip()
+        try:
+            out[cyp] = float(val.strip())
+        except ValueError:
+            bad.append(pair)
+    if bad:
+        raise ValueError(
+            f"Malformed entries in {parameter_name}: {bad}. "
+            f"Expected 'CYP_NAME:VALUE,CYP_NAME:VALUE,...' "
+            f"using a colon (:) as the separator. Examples: "
+            f"'CYP3A4:0.8,CYP2C9:0.15' (fm) or "
+            f"'CYP3A4:0.5,CYP2C9:0.1' (CLint per pmol-rCYP)."
+        )
+    return out
+
+
+def validate_subject_sentinel(
+    body_weight: float, sex: str, age: float,
+) -> Optional[str]:
+    """
+    The default subject (73 kg, male, 30 y) is reasonable for many
+    drugs but wrong for pediatric / pregnant / elderly / female
+    studies. Detect the *exact* sentinel triple — if all three are
+    at default values, it likely means the user did not specify the
+    subject at all.
+
+    Returns a soft-warning string, or None.
+    """
+    if body_weight == 73.0 and sex == "male" and age == 30.0:
+        return (
+            "Subject defaults used: 73 kg male, age 30 years. If you "
+            "are simulating a pediatric, female, elderly, pregnant, or "
+            "non-typical subject, set body_weight, sex, and age "
+            "explicitly. Default subject is silently applied otherwise."
+        )
+    return None
+
 
 def validate_kp_method(kp_method: str) -> str:
     """Strict enum validation. Raises with the closest valid option."""
@@ -246,6 +321,7 @@ def validate_run_pbpk_inputs(
     body_weight: Optional[float] = None,
     age: Optional[float] = None,
     route: Optional[str] = None,
+    sex: Optional[str] = None,
 ) -> list[str]:
     """
     Run all checks. Raises on hard errors (invalid enum, mismatched
@@ -307,6 +383,12 @@ def validate_run_pbpk_inputs(
         CL_renal=CL_renal,
         compound_type=compound_type,
     ))
+    if body_weight is not None and sex is not None and age is not None:
+        sentinel_warning = validate_subject_sentinel(
+            body_weight=body_weight, sex=sex, age=age,
+        )
+        if sentinel_warning:
+            warnings.append(sentinel_warning)
     return warnings
 
 

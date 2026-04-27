@@ -214,12 +214,22 @@ def verify_citation(
     key = f"{ident_type}:{identifier}"
     if key in cache:
         rec = cache[key]
-        return CitationResult(
-            identifier=rec["identifier"], type=rec["type"],
-            status=CitationStatus(rec["status"]),
-            title=rec.get("title"), authors=rec.get("authors"),
-            year=rec.get("year"), journal=rec.get("journal"),
-        )
+        cached_status = CitationStatus(rec["status"])
+        # NOT_FOUND records have a 24h TTL — a transient network failure
+        # could have produced a NOT_FOUND that the API would now return
+        # as VERIFIED. Verified records are kept indefinitely (PMIDs and
+        # DOIs are stable identifiers).
+        cached_at = rec.get("cached_at", 0)
+        age_h = (time.time() - cached_at) / 3600
+        if cached_status == CitationStatus.NOT_FOUND and age_h > 24:
+            pass  # fall through to re-verify
+        else:
+            return CitationResult(
+                identifier=rec["identifier"], type=rec["type"],
+                status=cached_status,
+                title=rec.get("title"), authors=rec.get("authors"),
+                year=rec.get("year"), journal=rec.get("journal"),
+            )
 
     if mode == "offline":
         return CitationResult(identifier, ident_type, CitationStatus.UNVERIFIED,

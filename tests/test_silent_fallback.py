@@ -287,9 +287,10 @@ def t():
     out = tools["run_pbpk_simulation"].fn(
         name="midazolam", dose_mg=7.5, route="oral",
         duration_h=12.0, kp_method="poulin_theil",
+        body_weight=70.0, sex="male", age=35.0,  # explicit, not sentinel
     )
     assert "PBPK Simulation" in out
-    # Library compound + valid kp_method → no soft warnings
+    # Library compound + valid kp_method + explicit subject → no soft warnings
     assert "⚠️" not in out, f"unexpected warning:\n{out}"
 
 @test("custom Diclofenac + hepatocyte IVIVE (full Scenario F-style) clean")
@@ -301,6 +302,7 @@ def t():
         clearance_source="hepatocyte", CLint_vitro_hep=120.0,
         CL_renal=0.1, dose_mg=50.0, route="oral", duration_h=12.0,
         kp_method="schmitt",
+        body_weight=70.0, sex="male", age=35.0,  # explicit
     )
     assert "⚠️" not in out, f"unexpected warning:\n{out}"
 
@@ -547,6 +549,146 @@ def t():
     }
     missing = expected - set(tools.keys())
     assert not missing, f"missing tools: {missing}"
+
+# ============================================================
+# Section 10b: Second-pass silent-fallback patterns
+# ============================================================
+print("\n## Second-pass silent-fallback patterns")
+
+@test("absorption_model='first-order' (typo) raises with suggestion")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["run_pbpk_simulation"].fn(
+            name="midazolam", dose_mg=7.5, absorption_model="first-order",
+        ),
+        ValueError, "first_order",
+    )
+
+@test("library compound auto-uses recommended_kp_method (not just tip)")
+def t():
+    tools = _server()
+    out = tools["run_pbpk_simulation"].fn(
+        name="midazolam", dose_mg=7.5,
+        # kp_method not specified — should auto-select Midazolam's recommended PT
+    )
+    assert "poulin_theil" in out, \
+        "library Midazolam should auto-use poulin_theil, not silently fall to R&R"
+    assert "Auto-selected" in out, "should explicitly tell the user it overrode"
+
+@test("malformed fm_per_cyp ('=' instead of ':') raises")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["run_pbpk_simulation"].fn(
+            name="midazolam", dose_mg=7.5,
+            fm_per_cyp="CYP3A4=0.8,CYP2C9=0.15",
+        ),
+        ValueError, "Malformed",
+    )
+
+@test("malformed CLint_per_cyp raises")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["run_pbpk_simulation"].fn(
+            name="custom", logP=2.0, pKa=7.0, fu_p=0.5, R_bp=1.0,
+            compound_type="neutral", dose_mg=50.0,
+            clearance_source="rcyp",
+            CLint_per_cyp="CYP3A4 0.5;CYP2C9 0.1",  # space + semicolon
+        ),
+        ValueError, "Malformed",
+    )
+
+@test("default subject (73kg male age 30) emits sentinel warning")
+def t():
+    tools = _server()
+    out = tools["run_pbpk_simulation"].fn(
+        name="midazolam", dose_mg=7.5,  # body_weight, sex, age all default
+    )
+    assert "Subject defaults" in out or "73 kg" in out, \
+        "sentinel subject triple should emit warning"
+
+@test("explicit subject (50kg female age 8) does NOT trigger sentinel warning")
+def t():
+    tools = _server()
+    out = tools["run_pbpk_simulation"].fn(
+        name="midazolam", dose_mg=4.0,
+        body_weight=50.0, sex="female", age=8.0,
+    )
+    assert "Subject defaults" not in out
+
+@test("expired session distinguishes from never-existed")
+def t():
+    from core.session import (
+        register_compound, _SESSIONS, _EXPIRED_IDS, _get,
+    )
+    cid = register_compound("ExpireTest", mw=300.0, logP=2.0,
+                            pKa=7.0, compound_type="neutral")
+    # Manually expire it
+    _SESSIONS.pop(cid)
+    _EXPIRED_IDS.add(cid)
+    expect_raises(lambda: _get(cid), ValueError, "EXPIRED")
+    # Truly unknown ID → different message
+    try:
+        _get("cmpd_ffffffffffff")
+    except ValueError as e:
+        assert "Unknown" in str(e), \
+            f"unknown ID should say 'Unknown', not 'EXPIRED': {e}"
+
+@test("invalid validation_token rejected with clear message")
+def t():
+    from core.session import get_validated_draft
+    expect_raises(
+        lambda: get_validated_draft("vmodel_doesnotexist"),
+        ValueError, "Invalid validation_token",
+    )
+
+@test("DDI mechanism='reversible' without Ki raises")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["run_dynamic_ddi"].fn(
+            victim_name="midazolam", perp_name="ketoconazole",
+            ddi_mechanism="reversible",
+            # Ki not provided
+        ),
+        ValueError, "Ki",
+    )
+
+@test("DDI induction without Emax/EC50 raises")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["run_dynamic_ddi"].fn(
+            victim_name="midazolam", perp_name="rifampin",
+            ddi_mechanism="induction",
+        ),
+        ValueError, "Emax",
+    )
+
+@test("run_population_pbpk rejects invalid kp_method")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["run_population_pbpk"].fn(
+            name="midazolam", dose_mg=7.5, n_individuals=20,
+            kp_method="poulin-theil",
+        ),
+        ValueError, "poulin_theil",
+    )
+
+@test("run_population_pbpk rejects out-of-range custom fu_p")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["run_population_pbpk"].fn(
+            name="custom", logP=2.0, pKa=7.0, fu_p=1.5,
+            compound_type="neutral", R_bp=1.0,
+            CL_int=10.0, dose_mg=50.0, n_individuals=20,
+        ),
+        ValueError, "fu_p",
+    )
 
 # ============================================================
 # Section 11: Provenance audit (output-time layer)

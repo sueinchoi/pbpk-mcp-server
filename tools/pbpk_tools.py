@@ -432,6 +432,17 @@ def register_pbpk_tools(mcp: FastMCP):
             clearance_source, CL_int, CLint_vitro_hlm,
             CLint_vitro_hep, CLint_per_cyp,
         )
+        # Hard validation: absorption_model enum (typos like
+        # 'first-order' previously silently fell back to first_order)
+        from core.validation import validate_absorption_model, parse_cyp_dict
+        validate_absorption_model(absorption_model)
+        # Eager parse of CYP-dict strings — even if the downstream branch
+        # would skip them, malformed input must be flagged loudly so the
+        # user does not see "succeeded" when their CYP data was dropped.
+        if fm_per_cyp:
+            parse_cyp_dict(fm_per_cyp, parameter_name="fm_per_cyp")
+        if gut_cyp_clint:
+            parse_cyp_dict(gut_cyp_clint, parameter_name="gut_cyp_clint")
         # Schema-level: clearance discriminated union (re-validates ranges,
         # ensures the chosen source has its required input)
         try:
@@ -470,11 +481,9 @@ def register_pbpk_tools(mcp: FastMCP):
 
         elif clearance_source == "rcyp" and CLint_per_cyp is not None:
             from core.ivive import scale_recombinant_clint
-            cyp_dict = {}
-            for pair in CLint_per_cyp.split(","):
-                parts = pair.strip().split(":")
-                if len(parts) == 2:
-                    cyp_dict[parts[0].strip()] = float(parts[1].strip())
+            from core.validation import parse_cyp_dict
+            # Strict parsing — malformed entries raise (was: silently skipped)
+            cyp_dict = parse_cyp_dict(CLint_per_cyp, parameter_name="CLint_per_cyp")
             ivive_r = scale_recombinant_clint(cyp_dict, body_weight=body_weight, sex=sex)
             cl_int_resolved = ivive_r["CLint_in_vivo_L_per_h"]
             ivive_info = f"IVIVE (rCYP): {cyp_dict} → {cl_int_resolved:.1f} L/h"
@@ -507,16 +516,21 @@ def register_pbpk_tools(mcp: FastMCP):
         # --- Partition coefficients ---
         kp_override = None
         kp_warning = ""
-        # Auto-recommend better Kp method if user kept default R&R but library
-        # has a validated alternative for this compound.
+        # If the user kept the default kp_method AND a library compound
+        # carries a recommended_kp_method, USE the recommended method
+        # (do not just emit a tip — that was the silent fallback in
+        # earlier versions). The user is explicitly told this happened.
         user_kp_explicit = (kp_method != "rodgers_rowland")
         if (not user_kp_explicit
             and getattr(compound, "recommended_kp_method", None)
             and compound.recommended_kp_method != "rodgers_rowland"):
+            kp_method = compound.recommended_kp_method  # ← effective override
             kp_warning = (
-                f"\n> ℹ️ **Tip:** Library compound `{compound.name}` is more "
-                f"accurately simulated with `kp_method=\"{compound.recommended_kp_method}\"` "
-                f"(rationale in `pbpk_help`). Using R&R default may over/under-predict Vss.\n"
+                f"\n> ℹ️ **Auto-selected Kp method:** `{kp_method}` "
+                f"(library default for `{compound.name}`). "
+                f"R&R was NOT used; the library specifies a more "
+                f"accurate method for this compound class. To force "
+                f"R&R, pass `kp_method=\"rodgers_rowland\"` explicitly.\n"
             )
         # kp_method already validated above — direct enum construction is safe
         kp_method_enum = KpMethod(kp_method)
@@ -559,7 +573,7 @@ def register_pbpk_tools(mcp: FastMCP):
             dose_mg=dose_mg, duration_h=duration_h,
             n_doses=n_doses, interval_h=interval_h,
             body_weight=body_weight, age=age,
-            route=route,
+            route=route, sex=sex,
         )
 
         # --- Build model (with transporters if provided) ---
@@ -574,23 +588,17 @@ def register_pbpk_tools(mcp: FastMCP):
             infusion_duration_h=infusion_duration_h,
         )
         # Parse gut CYP CLint — direct or derived from liver fm
+        from core.validation import parse_cyp_dict
         parsed_gut_cyp = None
         if gut_cyp_clint:
-            # Direct gut CYP CLint input (L/h per CYP)
-            parsed_gut_cyp = {}
-            for pair in gut_cyp_clint.split(","):
-                parts = pair.strip().split(":")
-                if len(parts) == 2:
-                    parsed_gut_cyp[parts[0].strip()] = float(parts[1].strip())
+            # Direct gut CYP CLint input (L/h per CYP); strict parsing
+            parsed_gut_cyp = parse_cyp_dict(gut_cyp_clint,
+                                            parameter_name="gut_cyp_clint")
 
         elif fm_per_cyp and (CLint_vitro_hlm or CL_int > 0 or cl_int_resolved > 0):
             # Auto-derive gut CLint from liver CLint + fm per CYP
             from core.fg_prediction import scale_gut_clint_per_cyp
-            fm_dict = {}
-            for pair in fm_per_cyp.split(","):
-                parts = pair.strip().split(":")
-                if len(parts) == 2:
-                    fm_dict[parts[0].strip()] = float(parts[1].strip())
+            fm_dict = parse_cyp_dict(fm_per_cyp, parameter_name="fm_per_cyp")
             # Use HLM CLint if available, otherwise back-calculate from in vivo
             if CLint_vitro_hlm:
                 hlm_clint = CLint_vitro_hlm
@@ -1413,6 +1421,26 @@ def register_pbpk_tools(mcp: FastMCP):
         Returns:
             Population PK summary (median, 5th, 95th percentiles).
         """
+        # Hard validation: kp_method enum (typos previously silently
+        # ran with R&R)
+        from core.validation import validate_kp_method
+        validate_kp_method(kp_method)
+        # If a custom compound, range-check the supplied physchem
+        in_lib_pop = name and name.lower() in COMPOUND_LIBRARY
+        if not in_lib_pop:
+            from core.invariants import (
+                check_compound_ranges, raise_on_violations,
+            )
+            raise_on_violations(check_compound_ranges(
+                mw=mw if mw != 300.0 else None,
+                logP=logP if logP != 0.0 else None,
+                pKa=pKa if pKa != 7.0 else None,
+                fu_p=fu_p,
+                R_bp=R_bp,
+                ka=ka,
+                CL_int=CL_int if CL_int > 0 else None,
+                CL_renal=CL_renal if CL_renal > 0 else None,
+            ))
         if name.lower() in COMPOUND_LIBRARY:
             compound = COMPOUND_LIBRARY[name.lower()]
         else:
@@ -1791,6 +1819,51 @@ def register_pbpk_tools(mcp: FastMCP):
             duration_h: Total simulation time (h).
         """
         # Build victim
+        # Hard validations (range-check on custom compounds,
+        # DDI-mechanism prerequisite check)
+        from core.invariants import (
+            check_compound_ranges, check_ddi_ranges, raise_on_violations,
+        )
+        # DDI mechanism prerequisites: each mechanism requires specific params
+        if ddi_mechanism in ("reversible", "combined") and Ki is None:
+            raise ValueError(
+                f"ddi_mechanism='{ddi_mechanism}' requires Ki (reversible "
+                f"inhibition constant, µM). Currently Ki=None — provide a value "
+                f"or change mechanism."
+            )
+        if ddi_mechanism in ("mbi", "combined") and (KI is None or kinact is None):
+            raise ValueError(
+                f"ddi_mechanism='{ddi_mechanism}' requires both KI (µM) and "
+                f"kinact (1/h) for mechanism-based inhibition. "
+                f"KI={KI}, kinact={kinact}."
+            )
+        if ddi_mechanism == "induction" and (Emax is None or EC50 is None):
+            raise ValueError(
+                f"ddi_mechanism='induction' requires Emax (fold) and EC50 (µM). "
+                f"Emax={Emax}, EC50={EC50}."
+            )
+        # DDI parameter ranges
+        raise_on_violations(check_ddi_ranges(
+            Ki=Ki, KI=KI, kinact=kinact, Emax=Emax, EC50=EC50, fm=fm,
+        ))
+        # Range-check custom victim/perp physchem
+        if not (victim_name and victim_name.lower() in COMPOUND_LIBRARY):
+            raise_on_violations(check_compound_ranges(
+                mw=victim_mw if victim_mw != 300.0 else None,
+                logP=victim_logP if victim_logP != 0.0 else None,
+                pKa=victim_pKa if victim_pKa != 7.0 else None,
+                fu_p=victim_fu_p, R_bp=victim_R_bp, ka=victim_ka,
+                CL_int=victim_CL_int if victim_CL_int > 0 else None,
+            ))
+        if not (perp_name and perp_name.lower() in COMPOUND_LIBRARY):
+            raise_on_violations(check_compound_ranges(
+                mw=perp_mw if perp_mw != 300.0 else None,
+                logP=perp_logP if perp_logP != 0.0 else None,
+                pKa=perp_pKa if perp_pKa != 7.0 else None,
+                fu_p=perp_fu_p, R_bp=perp_R_bp, ka=perp_ka,
+                CL_int=perp_CL_int if perp_CL_int > 0 else None,
+            ))
+
         if victim_name.lower() in COMPOUND_LIBRARY:
             v_comp = COMPOUND_LIBRARY[victim_name.lower()]
         else:

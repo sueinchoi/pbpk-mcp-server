@@ -55,17 +55,25 @@ class CompoundDraft:
 
 _SESSIONS: dict[str, CompoundDraft] = {}
 _VALIDATION_TOKENS: dict[str, str] = {}    # token → compound_id
+_EXPIRED_IDS: set[str] = set()             # remember IDs we GC'd (for clear error msg)
 _TTL_SECONDS = 30 * 60
 
 
 def _gc():
-    """Remove sessions older than TTL."""
+    """Remove sessions older than TTL. Track expired IDs so a later
+    request for that ID gets 'expired' rather than 'never existed'."""
     now = time.time()
     stale = [cid for cid, d in _SESSIONS.items() if now - d.created_at > _TTL_SECONDS]
     for cid in stale:
         d = _SESSIONS.pop(cid, None)
         if d and d.validation_token:
             _VALIDATION_TOKENS.pop(d.validation_token, None)
+        _EXPIRED_IDS.add(cid)
+    # Cap expired-set size to avoid unbounded growth
+    if len(_EXPIRED_IDS) > 10000:
+        # Drop oldest half (set ordering is insertion order in CPython 3.7+
+        # for dict, but set has no order — just clear when too large)
+        _EXPIRED_IDS.clear()
 
 
 def _new_id() -> str:
@@ -110,10 +118,19 @@ def register_compound(name: str, mw: float, logP: float, pKa: float,
 
 def _get(compound_id: str) -> CompoundDraft:
     if compound_id not in _SESSIONS:
+        if compound_id in _EXPIRED_IDS:
+            raise ValueError(
+                f"Session compound_id='{compound_id}' EXPIRED "
+                f"(TTL: {_TTL_SECONDS // 60} min). The state was "
+                f"garbage-collected; you must call register_compound() "
+                f"again and re-add binding/clearance/absorption/"
+                f"structure with the same parameters before validating."
+            )
         raise ValueError(
             f"Unknown compound_id='{compound_id}'. "
-            f"Call register_compound() first, or check that the session "
-            f"hasn't expired (TTL: {_TTL_SECONDS // 60} min)."
+            f"Call register_compound() first to start a session. "
+            f"If you previously had this ID, it may have expired "
+            f"(TTL: {_TTL_SECONDS // 60} min)."
         )
     if _SESSIONS[compound_id].validated:
         raise ValueError(
@@ -298,16 +315,26 @@ def validate_model(compound_id: str) -> ValidationReport:
 
 
 def get_validated_draft(token: str) -> CompoundDraft:
-    """Resolve a validation token to its draft. Raises if not issued by us."""
+    """Resolve a validation token to its draft. Raises if not issued by us
+    or if the underlying session was garbage-collected."""
     if token not in _VALIDATION_TOKENS:
         raise ValueError(
-            f"Invalid or expired validation_token='{token}'. "
-            f"Call validate_model() first. simulate_validated() only "
+            f"Invalid validation_token='{token}'. "
+            f"Either it was never issued (call validate_model() first), "
+            f"or the parent session expired (TTL: {_TTL_SECONDS // 60} min) "
+            f"and the token was invalidated. simulate_validated() only "
             f"accepts tokens issued by a successful validate_model() call."
         )
     cid = _VALIDATION_TOKENS[token]
     if cid not in _SESSIONS:
-        raise ValueError(f"Session for token '{token}' was garbage-collected")
+        # Token was issued but session got GC'd — clean up the dangling token
+        _VALIDATION_TOKENS.pop(token, None)
+        raise ValueError(
+            f"Session for token '{token}' was garbage-collected after "
+            f"{_TTL_SECONDS // 60} min of inactivity. Re-run "
+            f"register_compound() through validate_model() to issue a "
+            f"new token."
+        )
     return _SESSIONS[cid]
 
 
