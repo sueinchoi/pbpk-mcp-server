@@ -166,6 +166,7 @@ def register_pbpk_tools(mcp: FastMCP):
         require_compound_input(name=name, library=COMPOUND_LIBRARY,
                                logP=logP, pKa=pKa, fu_p=fu_p, mw=mw,
                                tool_name="predict_kp")
+        name = name or ""   # defensive: None → ""
         if name.lower() in COMPOUND_LIBRARY:
             compound = COMPOUND_LIBRARY[name.lower()]
         else:

@@ -78,6 +78,12 @@ class CompoundSpec:
     # different method, tools may surface this recommendation as a hint.
     recommended_kp_method: Optional[str] = None
 
+    # Per-parameter citation map. Keys are parameter names ("logP", "fu_p",
+    # "CL_int", etc.) or "general"; values are PMID, DOI, or descriptive
+    # source strings. Library curators populate this; user-built compounds
+    # can leave it empty (the audit will warn).
+    citations: Optional[dict] = None
+
     def __post_init__(self):
         if isinstance(self.compound_type, str):
             self.compound_type = CompoundType(self.compound_type)
@@ -148,6 +154,16 @@ COMPOUND_LIBRARY = {
         fu_p=0.032, compound_type=CompoundType.MODERATE_BASE,
         R_bp=0.66, ka=4.16, Fa=0.88, Fg=0.57,
         CL_int=700.0,  # gives CL_h ~27 L/h (lit: 18-30 L/h, Thummel 1996)
+        citations={
+            "logP":  "ChEMBL CHEMBL601",
+            "pKa":   "DrugBank DB00683",
+            "fu_p":  "PMID:8730549 (Thummel 1996)",
+            "CL_int": "calibrated to PMID:8730549 (Thummel 1996) CL 18-30 L/h",
+            "Fa":    "PMID:6705445 (Greenblatt 1984)",
+            "Fg":    "PMID:8730549 (Thummel 1996)",
+            "kp_scale": "PMID:11283499 (Bjorkman 2001) tissue distribution",
+            "recommended_kp_method": "PMID:18602900 (Jansson 2008), PMID:22512336 (Graham 2012)",
+        },
         # Empirical Kp corrections from Björkman 2001 in vivo rat data
         # (tissue:plasma total concentration), scaled to normalize R&R prediction
         # to clinical Vss 0.6-1.5 L/kg (Greenblatt 1984).
@@ -172,12 +188,25 @@ COMPOUND_LIBRARY = {
         # Observed CL = Q_kid * CL_renal / (Q_kid + CL_renal).
         # 50 L/h intrinsic → 28.2 L/h observed (matches Pentikäinen 1979 ~30 L/h).
         CL_renal=50.0,
+        citations={
+            "logP":  "DrugBank DB00331",
+            "pKa":   "DrugBank DB00331 (biguanide)",
+            "fu_p":  "PMID:14657959 (Graham 2011) — negligible plasma binding",
+            "Fa":    "PMID:472547 (Pentikainen 1979) ~50-60% absorbed",
+            "CL_renal": "calibrated to PMID:472547 (Pentikainen 1979) CL ~30 L/h",
+        },
     ),
     "theophylline": CompoundSpec(
         name="Theophylline", mw=180.16, logP=-0.02, pKa=8.6,
         fu_p=0.40, compound_type=CompoundType.NEUTRAL,  # was ACID — corrected
         R_bp=0.82, ka=1.5, Fa=1.0,
         CL_int=5.0,  # gives CL_h ~2.3 L/h (lit: 2-4 L/h, Ogilvie 1978)
+        citations={
+            "logP": "DrugBank DB00277",
+            "pKa": "DrugBank DB00277",
+            "fu_p": "PMID:564917 (Ogilvie 1978)",
+            "CL_int": "calibrated to PMID:564917 (Ogilvie 1978) CL 2-4 L/h",
+        },
     ),
     "diazepam": CompoundSpec(
         name="Diazepam", mw=284.7, logP=2.82, pKa=3.4,
@@ -185,6 +214,13 @@ COMPOUND_LIBRARY = {
         R_bp=0.58, ka=1.68, Fa=1.0,
         CL_int=45.0,  # gives CL_h ~1.5 L/h (lit: 1.3-2.2 L/h, Greenblatt 1980)
         recommended_kp_method="poulin_theil",
+        citations={
+            "logP": "DrugBank DB00829",
+            "pKa": "DrugBank DB00829",
+            "fu_p": "PMID:7363485 (Greenblatt 1980)",
+            "CL_int": "calibrated to PMID:7363485 (Greenblatt 1980) CL 1.3-2.2 L/h",
+            "recommended_kp_method": "PMID:18602900 (Jansson 2008)",
+        },
     ),
     "warfarin": CompoundSpec(
         name="Warfarin", mw=308.3, logP=2.6, pKa=5.0,
@@ -197,10 +233,23 @@ COMPOUND_LIBRARY = {
         # Berezhkovskiy correction for albumin handling gives Vss 0.118 L/kg
         # (clinical target 0.09-0.18, Holford 1986) vs R&R 0.055 L/kg.
         recommended_kp_method="berezhkovskiy",
+        citations={
+            "logP": "DrugBank DB00682",
+            "pKa": "DrugBank DB00682",
+            "fu_p": "PMID:3536469 (Holford 1986)",
+            "CL_int": "calibrated to PMID:3536469 (Holford 1986) CL 0.1-0.3 L/h",
+            "recommended_kp_method": "PMC4015127 (Berezhkovskiy 2004)",
+        },
     ),
     "caffeine": CompoundSpec(
         name="Caffeine", mw=194.2, logP=-0.07, pKa=10.4,
         fu_p=0.64, compound_type=CompoundType.NEUTRAL,
         R_bp=1.0, ka=2.3, Fa=1.0, CL_int=6.0,
+        citations={
+            "logP": "DrugBank DB00201",
+            "pKa": "DrugBank DB00201",
+            "fu_p": "PMID:4029615 (Bonati 1985)",
+            "CL_int": "calibrated to PMID:4029615 (Bonati 1985)",
+        },
     ),
 }

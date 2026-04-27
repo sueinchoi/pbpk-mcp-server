@@ -31,6 +31,20 @@ class PKParameters:
     MRT: float            # Mean Residence Time (h)
     C_last: float         # Last measurable concentration (mg/L)
     T_last: float         # Time of last measurable concentration (h)
+    # --- NCA reliability fields (FDA/EMA criteria) ---
+    extrapolation_fraction: float = 0.0   # (AUC_inf - AUC_0_t) / AUC_inf
+    n_terminal_points: int = 0             # points used for lambda_z fit
+    terminal_r2: float = 0.0               # R² of terminal log-linear fit
+    duration_per_t_half: float = 0.0       # duration / t_half (≥3 is good)
+    reliability_flags: list = None         # human-readable warnings
+
+    def __post_init__(self):
+        if self.reliability_flags is None:
+            self.reliability_flags = []
+
+    def is_reliable(self) -> bool:
+        """True if all FDA/EMA reliability criteria pass."""
+        return not self.reliability_flags
 
     def to_markdown(self, compound_name: str = "", dose_mg: float = 0) -> str:
         """Format as markdown table."""
@@ -60,6 +74,22 @@ class PKParameters:
             f"| C_last | {self.C_last:.4g} | mg/L |",
             f"| T_last | {self.T_last:.2f} | h |",
         ])
+        # NCA reliability footer (always emit so silent-fallback is impossible)
+        lines.append("")
+        lines.append("### NCA reliability")
+        lines.append(f"- Extrapolation fraction: {self.extrapolation_fraction:.1%} "
+                     f"(FDA/EMA: <20% recommended)")
+        lines.append(f"- Terminal-phase points: {self.n_terminal_points} "
+                     f"(>= 3 required for valid λz)")
+        lines.append(f"- Terminal R²: {self.terminal_r2:.3f}")
+        lines.append(f"- Duration / t½: {self.duration_per_t_half:.1f} "
+                     f"(>= 3 recommended)")
+        if self.reliability_flags:
+            lines.append("\n⚠️ **NCA reliability warnings:**")
+            for f in self.reliability_flags:
+                lines.append(f"- {f}")
+        else:
+            lines.append("\n_NCA reliability criteria all met._")
         return "\n".join(lines)
 
 
@@ -97,7 +127,7 @@ def _estimate_terminal_slope(
     time: np.ndarray,
     conc: np.ndarray,
     min_points: int = 3,
-) -> tuple[float, float]:
+) -> tuple[float, float, int]:
     """
     Estimate terminal elimination rate constant (lambda_z) by log-linear
     regression on the terminal phase.
@@ -105,7 +135,7 @@ def _estimate_terminal_slope(
     Selects the best-fit terminal portion (highest R²) with >= min_points.
 
     Returns:
-        (lambda_z, R²)
+        (lambda_z, R², n_terminal_points)
     """
     # Filter out zero/negative concentrations
     mask = conc > 0
@@ -113,12 +143,13 @@ def _estimate_terminal_slope(
     c_pos = conc[mask]
 
     if len(t_pos) < min_points:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0
 
     ln_c = np.log(c_pos)
 
     best_lz = 0.0
     best_r2 = 0.0
+    best_n = 0
 
     # Try different starting points for terminal phase
     # Start from Cmax onwards (descending phase)
@@ -163,8 +194,9 @@ def _estimate_terminal_slope(
         if lz > 0 and r2 > best_r2:
             best_lz = lz
             best_r2 = r2
+            best_n = n
 
-    return best_lz, best_r2
+    return best_lz, best_r2, best_n
 
 
 def calculate_pk_parameters(
@@ -211,7 +243,7 @@ def calculate_pk_parameters(
     AUC_0_t = _auc_linear_log_trapezoidal(time, concentration)
 
     # Terminal slope estimation
-    lambda_z, r2 = _estimate_terminal_slope(time, concentration)
+    lambda_z, r2, n_terminal = _estimate_terminal_slope(time, concentration)
 
     # AUC(0-inf) = AUC(0-t) + C_last / lambda_z
     if lambda_z > 0 and C_last > 0:
@@ -246,6 +278,38 @@ def calculate_pk_parameters(
     # Vss (for IV only): Vss = CL * MRT
     Vss = CL_F * MRT if is_iv and CL_F > 0 else None
 
+    # --- NCA reliability metrics (FDA/EMA criteria) ---
+    flags: list[str] = []
+    extrapolation_fraction = 0.0
+    duration_per_t_half = 0.0
+    if AUC_0_inf > 0:
+        extrapolation_fraction = max(0.0, (AUC_0_inf - AUC_0_t) / AUC_0_inf)
+    if t_half > 0 and t_half != float("inf"):
+        sim_duration = float(time[-1] - time[0])
+        duration_per_t_half = sim_duration / t_half
+    if extrapolation_fraction > 0.20:
+        flags.append(
+            f"AUC extrapolation fraction = {extrapolation_fraction:.1%} "
+            f"(> 20% FDA/EMA threshold) — terminal phase undersampled, "
+            f"AUC_inf and CL/F are unreliable. Increase duration_h."
+        )
+    if n_terminal < 3:
+        flags.append(
+            f"Terminal-phase has only {n_terminal} points (< 3 required) — "
+            f"λz fit and t½ are unreliable."
+        )
+    if r2 > 0 and r2 < 0.85:
+        flags.append(
+            f"Terminal log-linear R² = {r2:.3f} (< 0.85) — terminal phase "
+            f"may not be truly mono-exponential or contains noise."
+        )
+    if 0 < duration_per_t_half < 3.0 and t_half != float("inf"):
+        flags.append(
+            f"Simulation duration covers only {duration_per_t_half:.1f}× t½ "
+            f"(< 3× recommended). t½ extrapolated from short tail; use "
+            f"`duration_h >= {3 * t_half:.0f}` for reliable estimate."
+        )
+
     return PKParameters(
         Cmax=Cmax,
         Tmax=Tmax,
@@ -257,6 +321,11 @@ def calculate_pk_parameters(
         Vz_F=Vz_F,
         Vss=Vss,
         MRT=MRT,
+        extrapolation_fraction=extrapolation_fraction,
+        n_terminal_points=n_terminal,
+        terminal_r2=r2,
+        duration_per_t_half=duration_per_t_half,
+        reliability_flags=flags,
         C_last=C_last,
         T_last=T_last,
     )

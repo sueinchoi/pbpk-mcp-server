@@ -1,5 +1,47 @@
 # PBPK MCP Server — Changelog
 
+## v2.3 (2026-04-22) — Fourth-pass: NCA reliability + library citations + defensive None
+
+A focused audit of the result-formatting layer (NCA), defensive
+input handling (name=None), and library compound provenance (no
+citations on the 6 reference drugs).
+
+### Three more silent-fallbacks closed
+
+1. **NCA results lacked reliability flags.** A simulation with
+   duration too short for the terminal phase silently extrapolated
+   AUC_inf and t_half from a stub of points; the result looked
+   valid. Every NCA output now carries an explicit "NCA reliability"
+   section with:
+   - Extrapolation fraction (FDA/EMA threshold: < 20%)
+   - Terminal-phase points (>= 3 required for valid λz)
+   - Terminal R² (< 0.85 → flag)
+   - Duration / t½ (>= 3 recommended)
+   - List of `reliability_flags` (empty → "_criteria all met_")
+
+2. **`name=None` produced a raw AttributeError.** The bare
+   `name.lower()` call elsewhere in tool bodies threw an
+   uninformative crash. `require_compound_input()` now coerces
+   None → "" defensively, and the downstream lookup sites do
+   the same.
+
+3. **Library compounds had no citation metadata.** The 6 reference
+   drugs (midazolam, metformin, theophylline, diazepam, warfarin,
+   caffeine) had values curated against literature but no citations
+   field — the provenance audit could not surface their sources.
+   New `CompoundSpec.citations` dict (per-parameter PMID/DOI/source).
+   All 6 entries populated with the actual references used during
+   curation (Thummel 1996, Greenblatt 1980/1984, Holford 1986,
+   Pentikäinen 1979, Ogilvie 1978, Bonati 1985, Björkman 2001,
+   Jansson 2008, Berezhkovskiy 2004).
+
+### Verification
+- 79/79 fail-fast tests pass (was 73)
+- 6 new test cases: NCA reliability section presence, short-duration
+  extrapolation flag, name=None as ValueError not AttributeError,
+  name=None with explicit physchem still works, library citation
+  presence, audit reflects citations.
+
 ## v2.2 (2026-04-22) — Third-pass: prediction-tool silent fallback
 
 A focused audit of the prediction tools (predict_kp,

@@ -112,6 +112,10 @@ def require_compound_input(
     The threshold for "supplied" is "any of the four is non-default".
     Sentinel defaults: logP=0, pKa=7.0, fu_p=1.0, mw=300.0.
     """
+    # Defensive: name may be passed as None (vs the empty-string default).
+    # `None.lower()` would raise AttributeError; coerce to empty string.
+    if name is None:
+        name = ""
     if name and name.lower() in library:
         return
     all_default = (

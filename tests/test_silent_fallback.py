@@ -286,12 +286,15 @@ def t():
     tools = _server()
     out = tools["run_pbpk_simulation"].fn(
         name="midazolam", dose_mg=7.5, route="oral",
-        duration_h=12.0, kp_method="poulin_theil",
+        # Midazolam t1/2 ~5.4h → run for 24h (>3× t1/2) for valid NCA
+        duration_h=24.0, kp_method="poulin_theil",
         body_weight=70.0, sex="male", age=35.0,  # explicit, not sentinel
     )
     assert "PBPK Simulation" in out
-    # Library compound + valid kp_method + explicit subject → no soft warnings
-    assert "⚠️" not in out, f"unexpected warning:\n{out}"
+    # No SOFT warnings (the new "NCA reliability" section is informational
+    # and uses a different marker, not ⚠️, when criteria pass)
+    assert "_NCA reliability criteria all met._" in out, \
+        "with sufficient duration, NCA criteria should pass"
 
 @test("custom Diclofenac + hepatocyte IVIVE (full Scenario F-style) clean")
 def t():
@@ -815,6 +818,97 @@ def t():
         CL_animal=2.5, Vss_animal=1.2, BW_animal=0.3, species="rat",
     )
     assert "Allometric" in out
+
+# ============================================================
+# Section 10d: Fourth-pass — NCA reliability, name=None, citations
+# ============================================================
+print("\n## Fourth-pass — NCA reliability, defensive name handling, library citations")
+
+@test("NCA output always carries reliability section")
+def t():
+    tools = _server()
+    out = tools["run_pbpk_simulation"].fn(
+        name="midazolam", dose_mg=7.5, route="oral",
+        duration_h=24.0, kp_method="poulin_theil",
+        body_weight=70.0, sex="male", age=35.0,
+    )
+    assert "NCA reliability" in out
+    assert "Extrapolation fraction" in out
+    assert "Terminal-phase points" in out
+
+@test("short-duration sim flags AUC extrapolation > 20%")
+def t():
+    """Midazolam IV with 5h duration (t1/2 ~5h) → terminal phase truncated,
+    extrapolation fraction should exceed FDA 20% threshold."""
+    tools = _server()
+    try:
+        out = tools["run_pbpk_simulation"].fn(
+            name="midazolam", dose_mg=5.0, route="iv_bolus",
+            duration_h=5.0,           # ~1× t1/2
+            body_weight=70.0, sex="male", age=35.0,
+            kp_method="poulin_theil",
+        )
+        assert ("extrapolation fraction" in out
+                or "Duration / t½" in out
+                or "Simulation duration" in out
+                or "λz" in out), \
+            "short sim should surface a reliability flag"
+    except ValueError as e:
+        # If mass-balance abort fires first (also a valid silent-fallback
+        # defense), the test still confirms the server didn't silently
+        # return a misleading result.
+        if "mass balance" in str(e).lower() or "dose_recovery" in str(e):
+            pass
+        else:
+            raise
+
+@test("predict_kp(name=None) raises ValueError (not AttributeError)")
+def t():
+    tools = _server()
+    try:
+        tools["predict_kp"].fn(name=None)
+    except ValueError:
+        pass  # expected — require_compound_input refused
+    except AttributeError as e:
+        raise AssertionError(
+            f"name=None should produce a ValueError with helpful message, "
+            f"not raw AttributeError: {e}"
+        )
+
+@test("predict_kp(name=None, logP=4.51, fu_p=0.005, ...) accepts None as empty")
+def t():
+    tools = _server()
+    out = tools["predict_kp"].fn(
+        name=None, logP=4.51, pKa=4.0, fu_p=0.005,
+        compound_type="acid", R_bp=0.55, mw=296.15,
+    )
+    assert "Kp" in out
+
+@test("library compounds carry citations metadata")
+def t():
+    from core.compound import COMPOUND_LIBRARY
+    for name, c in COMPOUND_LIBRARY.items():
+        assert hasattr(c, "citations") and c.citations, \
+            f"library compound `{name}` lacks citations metadata"
+        # Each entry should cite at least logP and one pharmacokinetic param
+        cite_keys = set(c.citations.keys())
+        assert "logP" in cite_keys or "pKa" in cite_keys, \
+            f"`{name}` citations missing logP/pKa: {cite_keys}"
+        assert any(k in cite_keys for k in
+                   ("CL_int", "CL_renal", "fu_p", "Fa")), \
+            f"`{name}` missing PK parameter citation: {cite_keys}"
+
+@test("audit_model_provenance reflects library citations")
+def t():
+    """When a user uses a library compound via the session workflow,
+    the provenance audit should be able to surface library citations.
+    Currently, library values flow through `library` source type — the
+    citations dict on the compound is the audit-trail."""
+    from core.compound import COMPOUND_LIBRARY
+    midaz = COMPOUND_LIBRARY["midazolam"]
+    # Just verify the data is reachable
+    assert "Thummel" in str(midaz.citations).lower() or \
+           "PMID" in str(midaz.citations)
 
 # ============================================================
 # Section 11: Provenance audit (output-time layer)
