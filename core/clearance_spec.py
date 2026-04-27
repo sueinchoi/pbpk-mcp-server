@@ -13,15 +13,26 @@ schema level.
 """
 
 from __future__ import annotations
-from typing import Annotated, Literal, Optional, Union
-from pydantic import BaseModel, Field, model_validator
+from typing import Annotated, Any, Literal, Optional, Union
+from pydantic import BaseModel, Field, field_validator, model_validator
+from .units import parse_quantity
 
 
 class DirectClearance(BaseModel):
-    """User supplies in vivo CL_int directly (e.g. from clinical CL fit)."""
+    """User supplies in vivo CL_int directly (e.g. from clinical CL fit).
+
+    Accepts either a float (assumed L/h) or a string with units like
+    '120 mL/min' — pint parses and converts to L/h before validation."""
     source: Literal["direct"] = "direct"
     CL_int_L_per_h: float = Field(..., gt=0, le=1.0e6,
         description="Hepatic intrinsic clearance referenced to plasma (L/h).")
+
+    @field_validator("CL_int_L_per_h", mode="before")
+    @classmethod
+    def _parse_unit(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return parse_quantity(v, "CL_int")
+        return v
 
 
 class HLMClearance(BaseModel):
@@ -35,6 +46,13 @@ class HLMClearance(BaseModel):
         description="Measured unbound fraction in HLM incubation. If None, "
                     "predicted from logP (Austin 2002). Measured value strongly preferred.")
 
+    @field_validator("CLint_vitro_uL_min_mg", mode="before")
+    @classmethod
+    def _parse_unit(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return parse_quantity(v, "CLint_vitro_hlm")
+        return v
+
 
 class HepatocyteClearance(BaseModel):
     """In vitro suspended/plated human hepatocytes — preserves CYP + UGT + transporters."""
@@ -44,6 +62,13 @@ class HepatocyteClearance(BaseModel):
     fu_hep_measured: Optional[float] = Field(None, gt=0, le=1.0,
         description="Measured unbound fraction in hepatocyte incubation. "
                     "If None, predicted from logP (Austin 2002). Measured value strongly preferred.")
+
+    @field_validator("CLint_vitro_uL_min_1e6cells", mode="before")
+    @classmethod
+    def _parse_unit(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return parse_quantity(v, "CLint_vitro_hep")
+        return v
 
 
 class RecombinantCYPClearance(BaseModel):

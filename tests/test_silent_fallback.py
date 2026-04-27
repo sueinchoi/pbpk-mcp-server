@@ -19,11 +19,13 @@ sys.path.insert(0, ROOT)
 
 from mcp.server.fastmcp import FastMCP
 from tools.pbpk_tools import register_pbpk_tools
+from tools.session_tools import register_session_and_citation_tools
 
 
 def _server():
     m = FastMCP("test")
     register_pbpk_tools(m)
+    register_session_and_citation_tools(m)
     return m._tool_manager._tools
 
 
@@ -302,10 +304,10 @@ def t():
     )
     assert "⚠️" not in out, f"unexpected warning:\n{out}"
 
-@test("30 tools registered")
+@test("41 tools registered (30 PBPK + 9 session + 2 citation)")
 def t():
     tools = _server()
-    assert len(tools) == 30, f"expected 30 tools, got {len(tools)}"
+    assert len(tools) == 41, f"expected 41 tools, got {len(tools)}"
 
 # ============================================================
 # Section 6: Determinism — same input → same NCA result
@@ -355,6 +357,154 @@ def t():
     # If invariants fail, get_physiology raises; reaching here means OK.
     total_vol = sum(p.organ_volumes.values()) + p.V_arterial + p.V_venous
     assert 50 < total_vol < 100, f"organ volumes total {total_vol} L for 70 kg"
+
+# ============================================================
+# Section 8: Unit-aware parsing (pint)
+# ============================================================
+print("\n## Unit-aware parsing")
+
+@test("CL_int='120 mL/min' parses to 7.2 L/h")
+def t():
+    from core.clearance_spec import DirectClearance
+    c = DirectClearance(CL_int_L_per_h="120 mL/min")
+    assert abs(c.CL_int_L_per_h - 7.2) < 0.01, f"got {c.CL_int_L_per_h}"
+
+@test("CL_int with incompatible unit (mg) raises")
+def t():
+    from core.clearance_spec import DirectClearance
+    expect_raises(
+        lambda: DirectClearance(CL_int_L_per_h="50 mg"),
+        Exception, "mismatch",
+    )
+
+@test("HLM CLint='0.07 mL/min/mg' parses to 70 µL/min/mg")
+def t():
+    from core.clearance_spec import HLMClearance
+    c = HLMClearance(CLint_vitro_uL_min_mg="0.07 mL/min/mg")
+    assert abs(c.CLint_vitro_uL_min_mg - 70.0) < 0.5, f"got {c.CLint_vitro_uL_min_mg}"
+
+@test("plain float still works (assumed canonical unit)")
+def t():
+    from core.clearance_spec import DirectClearance
+    c = DirectClearance(CL_int_L_per_h=15.0)
+    assert c.CL_int_L_per_h == 15.0
+
+# ============================================================
+# Section 9: Citation verification (offline-only — no network)
+# ============================================================
+print("\n## Citation verification")
+
+@test("invalid PMID format rejected")
+def t():
+    from core.citation import verify_citation, CitationStatus
+    r = verify_citation("not-a-pmid", mode="offline")
+    assert r.status == CitationStatus.INVALID_FORMAT
+
+@test("invalid DOI format rejected")
+def t():
+    from core.citation import verify_citation, CitationStatus
+    r = verify_citation("garbage/10.x", mode="offline")
+    assert r.status == CitationStatus.INVALID_FORMAT
+
+@test("valid PMID format + offline cache miss → UNVERIFIED")
+def t():
+    from core.citation import verify_citation, CitationStatus
+    r = verify_citation("99999999", mode="offline")
+    assert r.status == CitationStatus.UNVERIFIED
+
+@test("valid DOI format + offline cache miss → UNVERIFIED")
+def t():
+    from core.citation import verify_citation, CitationStatus
+    r = verify_citation("10.1000/xyz123", mode="offline")
+    assert r.status == CitationStatus.UNVERIFIED
+
+# ============================================================
+# Section 10: Session workflow — token gate + prerequisites
+# ============================================================
+print("\n## Session workflow")
+
+@test("simulate_validated rejects fake token")
+def t():
+    from core.session import get_validated_draft
+    expect_raises(lambda: get_validated_draft("fake_token_123"),
+                  ValueError, "Invalid")
+
+@test("validate_model fails with missing groups")
+def t():
+    from core.session import register_compound, validate_model
+    cid = register_compound("TestDrug1", mw=300.0, logP=2.5,
+                            pKa=7.0, compound_type="neutral")
+    rep = validate_model(cid)
+    assert not rep.ok
+    assert any("binding" in m for m in rep.missing)
+    assert any("clearance" in m for m in rep.missing)
+
+@test("complete session validates and issues token")
+def t():
+    from core.session import (
+        register_compound, add_binding, add_clearance,
+        add_absorption, select_model_structure, validate_model,
+    )
+    cid = register_compound("TestDrug2", mw=325.8, logP=3.89,
+                            pKa=6.2, compound_type="moderate_base")
+    add_binding(cid, fu_p=0.04, R_bp=0.66)
+    add_clearance(cid, source="hepatocyte", CLint_vitro_hep=50.0)
+    add_absorption(cid, ka=2.0, Fa=0.95, Fg=0.55)
+    select_model_structure(cid, kp_method="poulin_theil")
+    rep = validate_model(cid)
+    assert rep.ok, f"validation should pass, missing: {rep.missing}"
+    assert rep.validation_token is not None
+
+@test("full session flow Diclofenac → simulate_validated runs")
+def t():
+    from core.session import (
+        register_compound, add_binding, add_clearance, add_absorption,
+        select_model_structure, validate_model, get_validated_draft,
+    )
+    cid = register_compound("Diclofenac_session", mw=296.15, logP=4.51,
+                            pKa=4.0, compound_type="acid",
+                            mw_source="PubChem CID 3033",
+                            logP_source="PMID:9351894")
+    add_binding(cid, fu_p=0.005, R_bp=0.55,
+                fu_p_source="Davies 1997 PMID:9106794")
+    add_clearance(cid, source="hepatocyte", CLint_vitro_hep=120.0,
+                  CL_renal=0.1)
+    add_absorption(cid, ka=2.0, Fa=1.0, Fg=0.76)
+    select_model_structure(cid, kp_method="schmitt")
+    rep = validate_model(cid)
+    assert rep.ok
+    draft = get_validated_draft(rep.validation_token)
+    assert draft.name == "Diclofenac_session"
+    assert "fu_p" in draft.sources
+
+@test("post-validation modification rejected")
+def t():
+    from core.session import (
+        register_compound, add_binding, add_clearance,
+        add_absorption, select_model_structure, validate_model,
+    )
+    cid = register_compound("LockTest", mw=300.0, logP=2.0,
+                            pKa=7.0, compound_type="neutral")
+    add_binding(cid, fu_p=0.5, R_bp=1.0)
+    add_clearance(cid, source="direct", CL_int=10.0)
+    add_absorption(cid)
+    select_model_structure(cid)
+    rep = validate_model(cid)
+    assert rep.ok
+    expect_raises(lambda: add_binding(cid, fu_p=0.1, R_bp=0.5),
+                  ValueError, "validated")
+
+@test("session + citation tools registered")
+def t():
+    tools = _server()
+    expected = {
+        "register_compound", "add_binding", "add_clearance", "add_absorption",
+        "add_transporters", "select_model_structure", "validate_model",
+        "simulate_validated", "session_summary",
+        "verify_citation", "verify_citation_list",
+    }
+    missing = expected - set(tools.keys())
+    assert not missing, f"missing tools: {missing}"
 
 # ============================================================
 # Summary

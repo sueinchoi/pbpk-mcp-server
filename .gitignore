@@ -12,6 +12,7 @@ __pycache__/
 # Generated artifacts
 *.png
 data/audit.jsonl
+data/citation_cache.jsonl
 
 # Editor
 .vscode/

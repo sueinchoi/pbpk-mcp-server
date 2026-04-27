@@ -1,5 +1,51 @@
 # PBPK MCP Server — Changelog
 
+## v1.8 (2026-04-22) — Units, citations, session-based workflow
+
+Completes the server-side safety architecture with the three remaining
+axes from the v1.7 audit: unit-aware parameter parsing, live citation
+verification, and decomposition of `run_pbpk_simulation` into a
+prerequisite-gated session workflow.
+
+### New
+- `core/units.py` — pint-based canonical unit table for every PBPK
+  parameter. `parse_quantity('70 uL/min/mg', 'CLint_vitro_hlm')`
+  converts to canonical and returns the magnitude. Incompatible units
+  (e.g. CL_int passed in mg) raise with a dimensional mismatch error.
+- `core/citation.py` — verify a PMID against PubMed E-utils or a DOI
+  against Crossref. Three modes: online (cache + live), offline
+  (cache only), strict (cache miss → ValueError). Results cached to
+  `data/citation_cache.jsonl`.
+- `core/session.py` — session-based PBPK workflow. Decomposes the
+  47-flat-parameter `run_pbpk_simulation` into 8 prerequisite-checked
+  steps (register → binding → clearance → absorption → transporters →
+  structure → validate → simulate). `validate_model()` issues a token
+  that `simulate_validated()` requires; missing parameter groups are
+  enumerated explicitly.
+- `tools/session_tools.py` — 11 new MCP tools exposing the session
+  workflow and citation verification. Total tool count: 41 (30 PBPK
+  + 9 session + 2 citation).
+
+### Changed
+- `core/clearance_spec.py` — every CLint field accepts unit-bearing
+  strings via pint validators. Dimensional mismatches reject at
+  schema construction.
+- `tests/test_silent_fallback.py` — 38 cases now (was 24). New
+  sections: unit-aware parsing, citation verification, session
+  workflow.
+- `pyproject.toml` — adds pydantic, pint, requests dependencies.
+
+### Architecture summary (v1.7 + v1.8)
+The server now has 4 server-side safety layers:
+1. **Schema** — Pydantic discriminated unions (clearance), nested
+   pair models (transporters), unit parsing (pint).
+2. **Invariants** — physiological ranges per parameter, mass
+   balance for physiology tables.
+3. **Workflow** — session-based decomposition with token-gated
+   simulation; missing groups fail validate_model() loudly.
+4. **Audit + provenance** — append-only JSONL, citation cache,
+   per-parameter source tracking.
+
 ## v1.7 (2026-04-22) — Server-side safety architecture
 
 Schema and invariant enforcement against silent-fallback patterns

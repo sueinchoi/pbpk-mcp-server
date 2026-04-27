@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from mcp.server.fastmcp import FastMCP
 from tools.pbpk_tools import register_pbpk_tools
+from tools.session_tools import register_session_and_citation_tools
 from prompts.user_guide import format_user_guide, count_all_parameters
 
 mcp = FastMCP(
@@ -17,20 +18,22 @@ mcp = FastMCP(
     instructions=(
         "Whole-body PBPK modeling server with 7 Kp methods, ACAT absorption, "
         "IVIVE pipeline, DDI prediction, population simulation, transporters, "
-        "and PKSimDB integration. 30 tools available."
+        "PKSimDB integration, session-based workflow, and citation verification. "
+        "40 tools available."
     ),
 )
 
 register_pbpk_tools(mcp)
+register_session_and_citation_tools(mcp)
 
 
 # --- Resources ---
 @mcp.resource("pbpk://status")
 def get_status() -> str:
     counts = count_all_parameters()
-    return f"""# PBPK MCP Server v1.6
+    return f"""# PBPK MCP Server v1.8
 
-## Tools: 30 | Parameters: {counts['total']} configurable
+## Tools: 41 (30 PBPK + 9 session + 2 citation) | Parameters: {counts['total']} configurable
 - Tier 1 (Required): {counts['tier1_required']} params
 - Tier 2 (Recommended): {counts['tier2_recommended']} params
 - Tier 3 (Optional): {counts['tier3_optional']} params

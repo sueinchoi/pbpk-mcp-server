@@ -115,31 +115,51 @@ even though CL was right.
 ## Server-side safety architecture
 
 The MCP server prefers schema/invariant enforcement over prompt
-instructions. Four layers cooperate:
+instructions. Seven layers cooperate:
 
 1. **`core/clearance_spec.py`** — Pydantic discriminated union
    (`DirectClearance | HLMClearance | HepatocyteClearance |
    RecombinantCYPClearance`) keyed by `source`. Required fields per
-   variant are enforced at schema level. Replaces the legacy
-   five-parallel-kwargs design where `clearance_source="hlm"` with
-   `CLint_vitro_hep` provided would silently produce a no-elimination
-   simulation.
+   variant are enforced at schema level. Each CLint field accepts
+   unit-bearing strings ('70 uL/min/mg') via pint validators.
 2. **`core/transporter_spec.py`** — `TransporterKwargs.from_legacy_kwargs`
    pairs Km/Vmax at schema level (XOR is an error). Eliminates the
    "I gave km but vmax was None" silent drop.
 3. **`core/invariants.py`** — physiological-range hard limits for
-   every numeric parameter (`fu_p ∈ [1e-5, 1.0]`, `logP ∈ [-5, 10]`,
-   etc.). Mass-balance check on physiology tables (organ volumes Σ
-   ≈ body weight, blood flow fractions Σ ≈ 1.0) runs at startup
-   inside `get_physiology` — corrupt physiology table fails fast.
-4. **`core/audit.py`** — append-only JSONL log
-   (`data/audit.jsonl`) with input fingerprint, resolved parameters,
-   warnings, and NCA summary. `replay_lookup(fingerprint)` for
-   reproducibility.
+   every numeric parameter. Mass-balance checks (organ volumes Σ ≈
+   body weight, blood flow Σ ≈ 1.0) run inside `get_physiology`.
+4. **`core/units.py`** — pint canonical unit table. `parse_quantity`
+   converts user-supplied strings to canonical units; incompatible
+   units raise with dimensional mismatch.
+5. **`core/citation.py`** — PMID verification via NCBI E-utils, DOI
+   via Crossref. Cached to `data/citation_cache.jsonl`. Strict mode
+   raises on cache miss + network error — use for publication-grade
+   workflows.
+6. **`core/session.py`** + **`tools/session_tools.py`** —
+   prerequisite-gated workflow. Decomposes the 47-parameter flat
+   call into 8 explicit steps. `validate_model()` issues a token;
+   `simulate_validated()` only accepts that token. Half-built
+   sessions cannot be simulated.
+7. **`core/audit.py`** — append-only JSONL at `data/audit.jsonl`
+   with input fingerprint, resolved parameters, warnings, and NCA
+   summary. `replay_lookup(fingerprint)` for reproducibility.
 
-When refactoring, preserve all four layers. The fail-fast test suite
-(`tests/test_silent_fallback.py`, run via `python -m
-tests.test_silent_fallback`) covers 24 specific failure modes.
+When refactoring, preserve all seven layers. The fail-fast test
+suite (`tests/test_silent_fallback.py`, run via `python -m
+tests.test_silent_fallback`) covers 38 specific failure modes
+across these layers.
+
+### Tool surface (41 total)
+
+- **30 legacy PBPK tools** — flat-parameter API kept for
+  back-compat. `run_pbpk_simulation` now goes through schema
+  validation but accepts the same kwargs.
+- **9 session tools** — `register_compound`, `add_binding`,
+  `add_clearance`, `add_absorption`, `add_transporters`,
+  `select_model_structure`, `validate_model`, `simulate_validated`,
+  `session_summary`. Use these for fabrication-resistant workflows.
+- **2 citation tools** — `verify_citation`, `verify_citation_list`.
+  Call before inserting any PMID/DOI into a Source field.
 
 ## Input validation (`core/validation.py`)
 
