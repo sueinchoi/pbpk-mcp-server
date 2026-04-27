@@ -1,84 +1,231 @@
-# PBPK MCP Server — User Tutorial
+# PBPK MCP Server — Step-by-Step Tutorial
 
-A walk-through of PBPK model construction across 5 scenarios, with real test
-records. All outputs were verified by actual MCP calls in a `claude-opus-4-7`
-session.
+This tutorial shows how to use the server as it was designed: an
+**LLM-driven, interactive PBPK lab assistant**. You describe the
+compound and the question in plain English, the LLM searches
+literature for missing parameters, asks you when a value cannot be
+inferred, and the server enforces every invariant before returning
+a result.
 
-**Date**: 2026-04-20  |  **Server version**: v1.5  |  **30 tools**
+**Server version:** v2.3  |  **42 tools** (30 PBPK + 10 session/audit + 2 citation)
 
 ---
 
 ## Table of Contents
 
-- [Scenario A: Simulating a known drug (Midazolam)](#scenario-a)
-- [Scenario B: Modeling a new drug from in vitro data](#scenario-b)
-- [Scenario C: Drug-Drug Interaction (DDI) assessment](#scenario-c)
-- [Scenario D: Special populations (pediatric / pregnancy / CKD / variability)](#scenario-d)
+- [How to think about this server](#how-to-think)
+- [Anatomy of a PBPK conversation](#conversation-anatomy)
+- [Scenario A: Simulating a library drug (Midazolam)](#scenario-a)
+- [Scenario B: New compound from in vitro data](#scenario-b)
+- [Scenario C: Drug-drug interaction (DDI) assessment](#scenario-c)
+- [Scenario D: Special populations](#scenario-d)
 - [Scenario E: Transporter-driven drug (statin-like)](#scenario-e)
-- [Reference: Kp method selection rules](#kp-method-selection)
+- [Scenario F: NSAID with EHC (Diclofenac, end-to-end)](#scenario-f)
+- [Reference: Kp method selection](#kp-method-selection)
 - [Reference: Parameter naming rules](#parameter-naming-rules)
+- [The safety net: what the server enforces](#safety-net)
+
+---
+
+<a id="how-to-think"></a>
+## How to think about this server
+
+You will not build a PBPK model by writing 47 keyword arguments. You
+will have a **conversation**:
+
+```
+You:  "Predict the PK of diclofenac 50 mg oral in a healthy adult.
+       I have hepatocyte CLint = 120 µL/min/10⁶ cells from our lab."
+
+LLM:  Looks up diclofenac on PubChem (CID 3033) and ChEMBL → MW 296.15,
+      logP 4.51, pKa 4.0.
+      Searches PubMed for fu_p → finds Davies 1997 PMID:9106794, fu_p
+      = 0.005 (highly bound acid).
+      Notices: this is a highly-bound acid → recommends Kp method
+      "berezhkovskiy" or "schmitt" (server's Kp selection rule).
+      Asks: "Do you have measured R_bp? If not, I'll predict ≈ 0.55
+      from RBC partitioning (Rodgers-Rowland 2005) — let me know if
+      you have a measurement."
+
+You:  "Use the prediction. Run it."
+
+LLM:  Calls run_pbpk_simulation(...) with full provenance: every
+      parameter tagged M (measured) / L (literature) / P (predicted).
+      Returns:
+        - PK (Cmax, AUC, t½, F, Vss)
+        - NCA reliability flags
+        - Modelling Provenance footer
+        - Audit fingerprint (replay later)
+```
+
+This is the workflow. The rest of the tutorial shows you the full
+range of things that conversation can do.
+
+---
+
+<a id="conversation-anatomy"></a>
+## Anatomy of a PBPK conversation
+
+When you make a request to an LLM connected to this MCP server, the
+LLM goes through these stages — you can interrupt at any point:
+
+### Stage 1 — Identify the compound
+
+The LLM uses one of several lookup paths in priority order:
+
+| Source | Tool | Returns | Confidence |
+|---|---|---|---|
+| Built-in library (6 drugs) | `list_compounds` / `drug_properties` | Curated values + PMID/DOI citations | high |
+| ChEMBL REST API | `drug_properties(drug_name=...)` | MW, logP, pKa, ChEMBL ID | medium-high |
+| PubChem (web search via LLM) | LLM web tool + `verify_citation` | CID, structure, computed properties | medium |
+| User-supplied measurements | (passed as kwargs) | Whatever the user gives | high |
+
+For library drugs (`midazolam`, `metformin`, `theophylline`,
+`diazepam`, `warfarin`, `caffeine`), every parameter in
+`COMPOUND_LIBRARY` carries a `citations` dict with the actual PMIDs
+used during curation. The provenance audit surfaces them.
+
+### Stage 2 — Audit what's missing
+
+After Stage 1, the LLM has a partial parameter set. It checks:
+
+- **Required (Tier 1)**: name, MW, dose, route — must have to run
+- **Strongly recommended (Tier 2)**: logP, pKa, fu_p, compound_type,
+  clearance source — affects every Kp / CL prediction
+- **Priority-1 measurements**: fu_hep, fu_inc, R_bp, Caco-2 Papp —
+  these the LLM will explicitly ASK YOU for. Default fallbacks
+  (Austin 2002 from logP, etc.) are documented but flagged.
+
+### Stage 3 — Interactive clarification
+
+The LLM is instructed (via the server's `pbpk_modeling_guide`
+prompt) to **ask you** instead of substituting defaults silently:
+
+> "I don't have a measured R_bp for your compound. Do you have one,
+> or should I predict from RBC partitioning (Rodgers-Rowland 2005)?"
+
+> "You provided HLM CLint = 70 µL/min/mg, but diclofenac has a known
+> UGT2B7 acyl-glucuronide pathway (~30% fm). HLM misses UGT. Do you
+> have a hepatocyte CLint instead, or should I proceed with HLM
+> understanding CL will be 2-5× under-predicted?"
+
+> "You said 'simulate diclofenac' but didn't specify a dose. The most
+> common adult oral dose is 50 mg or 75 mg. Which?"
+
+If the LLM fails to ask and substitutes silently, the server's
+**provenance audit** (`audit_model_provenance`) and **soft warnings**
+will mark the value as `default-substituted` ⚠️ in the output.
+
+### Stage 4 — Citation verification
+
+Whenever the LLM cites literature (PMID or DOI), it can call
+`verify_citation()` to confirm the source actually exists in PubMed
+or Crossref. Fabricated PMIDs are caught here.
+
+```
+verify_citation("9106794")
+  → status: verified
+  → title: "Pharmacokinetics and pharmacodynamics of diclofenac..."
+  → authors: "Davies NM, Anderson KE"
+  → year: 1997
+  → journal: "Clin Pharmacokinet"
+```
+
+### Stage 5 — Run, validate, audit
+
+The actual `run_pbpk_simulation` (or session-based
+`simulate_validated`) call happens. The server then:
+
+1. Validates every input against physiological ranges
+2. Solves the 16-state ODE (BDF, atol=1e-10, rtol=1e-8)
+3. Asserts post-simulation dose recovery (1% IV / 5% oral) → **abort
+   on failure**
+4. Computes NCA with reliability flags (extrapolation < 20%, ≥3
+   terminal points, R² ≥ 0.85, duration ≥ 3× t½)
+5. Writes audit fingerprint to `data/audit.jsonl`
+6. Returns markdown with provenance + reliability footer
+
+You get a result you can defend, or an abort with a specific reason.
 
 ---
 
 <a id="scenario-a"></a>
-## Scenario A: Simulating a known drug (Midazolam)
+## Scenario A: Simulating a library drug (Midazolam)
 
-**Goal**: Predict PK after a 7.5 mg oral dose of midazolam, a common clinical
-benchmark compound.
+**Goal**: predict PK after 7.5 mg oral midazolam in a healthy adult,
+and compute oral bioavailability F.
 
-### A1. Look up drug properties
+### Step 1 — Discover the compound
+
+Plain-English request to the LLM:
+
+> "I want to simulate midazolam 7.5 mg oral in a 70 kg adult."
+
+The LLM calls:
 
 ```python
-mcp.call_tool("drug_properties", {"drug_name": "midazolam"})
+drug_properties(drug_name="midazolam")
 ```
 
-**Output**:
+Output:
+
 ```
 ## Drug Properties — Midazolam
 Source: curated
 
-| Property | Value |
-|----------|-------|
-| ChEMBL ID | CHEMBL601 |
-| MW | 325.80 g/mol |
-| logP | 3.89 |
-| pKa | 6.2 |
-| Ro5 violations | 0 |
+| Property        | Value          |
+| ChEMBL ID       | CHEMBL601      |
+| MW              | 325.80 g/mol   |
+| logP            | 3.89           |
+| pKa             | 6.2            |
+| Ro5 violations  | 0              |
 ```
 
-**Interpretation**: Midazolam is a moderate base (pKa 6.2) with intermediate
-lipophilicity (logP 3.89). Zero Ro5 violations suggests good oral absorption.
+The LLM also notes that `midazolam` is in `COMPOUND_LIBRARY`, so
+fu_p, R_bp, ka, Fa, Fg, CL_int are all curated — and every value
+carries a citation (Thummel 1996, Greenblatt 1984, Björkman 2001,
+Jansson 2008).
 
----
+### Step 2 — Choose a Kp method (auto)
 
-### A2. Choose a Kp method
+For library compounds with a `recommended_kp_method`, the server
+**auto-selects** it. Midazolam (lipophilic moderate base, logP > 3)
+→ `poulin_theil`. The output explicitly tells you:
+
+> ℹ️ **Auto-selected Kp method:** `poulin_theil` (library default for
+> Midazolam). R&R was NOT used; the library specifies a more
+> accurate method for this compound class. To force R&R, pass
+> `kp_method="rodgers_rowland"` explicitly.
+
+You can inspect the alternatives manually:
 
 ```python
-mcp.call_tool("compare_kp_methods", {"name": "midazolam"})
+compare_kp_methods(name="midazolam")
 ```
 
-**Excerpt** (Adipose / Liver rows):
+Excerpt (Adipose / Liver rows):
+
 | Tissue | R&R | Lukacova | Schmitt | PT | PTB | PK-Sim | Kp_mem |
-|--------|-----|----------|---------|-----|-----|--------|--------|
+|---|---|---|---|---|---|---|---|
 | Adipose | 4.26 | 4.26 | 3.83 | 3.20 | 4.16 | 4.56 | 17.36 |
 | Liver | 1.89 | 1.89 | 9.84 | 0.35 | 1.28 | 3.97 | 3.03 |
 
-**Selection rule**: Midazolam is a moderate base with logP > 3 → use
-**Poulin-Theil** (R&R systematically over-predicts adipose Kp for lipophilic
-bases — Jansson 2008, Graham 2012).
-
----
-
-### A3. PBPK simulation (Midazolam 7.5 mg PO)
+### Step 3 — Run the simulation
 
 ```python
-mcp.call_tool("run_pbpk_simulation", {
-    "name": "midazolam", "dose_mg": 7.5, "route": "oral",
-    "duration_h": 24, "kp_method": "poulin_theil",
-})
+run_pbpk_simulation(
+    name="midazolam",
+    dose_mg=7.5,
+    route="oral",
+    duration_h=24.0,                    # ≥ 3× t½ for valid NCA
+    body_weight=70.0,                   # explicit subject avoids sentinel warn
+    sex="male",
+    age=35.0,
+    kp_method="poulin_theil",           # or omit — library auto-selects
+)
 ```
 
-**Result**:
+Result (excerpt):
 
 | Parameter | Predicted | Clinical (Greenblatt 1984) |
 |---|---|---|
@@ -86,382 +233,568 @@ mcp.call_tool("run_pbpk_simulation", {
 | Tmax | 0.38 h | 0.5-1.5 h ≈ |
 | AUC_inf | **167.9 ng·h/mL** | 75-250 ng·h/mL ✓ |
 | t½ | **5.40 h** | 1.8-6.4 h ✓ |
-| CL/F | 44.66 L/h | - |
+| CL/F | 44.66 L/h | – |
 
-Tissue concentrations distribute correctly given Kp (Gut C_tissue/C_plasma =
-8.2 — drug accumulating in enterocytes immediately after absorption).
+```
+### NCA reliability
+- Extrapolation fraction: 8.2% (FDA/EMA: <20% recommended)
+- Terminal-phase points: 47 (>= 3 required for valid λz)
+- Terminal R²: 0.998
+- Duration / t½: 4.4 (>= 3 recommended)
 
----
-
-### A4. IV vs PO — computing oral bioavailability (F)
-
-```python
-# IV: 5 mg bolus
-r_iv = call("run_pbpk_simulation", {..., "route": "iv_bolus", ...})
-# PO: 5 mg
-r_po = call("run_pbpk_simulation", {..., "route": "oral", ...})
-F = AUC_po / AUC_iv
+_NCA reliability criteria all met._
 ```
 
-**Result**:
-- IV AUC = 0.312 mg·h/L, CL = **16.03 L/h** (lit 18-30)
-- PO AUC = 0.112 mg·h/L, CL/F = 44.66 L/h
-- **F_oral = 0.359 (36%)** — lit 30-50% ✓
+### Step 4 — Compute F (IV vs oral)
+
+```python
+# IV bolus
+iv = run_pbpk_simulation(name="midazolam", dose_mg=5.0, route="iv_bolus",
+                         duration_h=24.0, body_weight=70.0, sex="male", age=35.0)
+
+# Oral
+po = run_pbpk_simulation(name="midazolam", dose_mg=5.0, route="oral",
+                         duration_h=24.0, body_weight=70.0, sex="male", age=35.0)
+```
+
+Result:
+- IV CL = 16.03 L/h (lit 18-30)
+- PO CL/F = 44.66 L/h
+- **F_oral = AUC_po / AUC_iv = 0.359 (36%)** — lit 30-50% ✓
 
 ---
 
 <a id="scenario-b"></a>
-## Scenario B: Modeling a new drug from in vitro data
+## Scenario B: New compound from in vitro data
 
-**Goal**: Predict clinical PK for a new CYP3A4 substrate measured at HLM
-CLint = 30 µL/min/mg.
+**Goal**: a CYP3A4 substrate measured at HLM CLint = 30 µL/min/mg.
+Predict clinical PK. The compound is NOT in the library.
 
-### B1. IVIVE — convert HLM CLint to in vivo CLint
+### Step 1 — Establish identity
+
+You provide: name="NewDrug", logP=3.5, MW=400, pKa=7.0, fu_p=0.1,
+compound_type="neutral", R_bp=1.0. The LLM range-checks all of these
+(server invariants). If fu_p=1.5 by typo, ValueError immediately.
+
+### Step 2 — IVIVE: HLM CLint → in vivo CLint
 
 ```python
-mcp.call_tool("ivive_microsomal", {
-    "clint_vitro": 30.0, "logP": 3.5, "protein_conc": 1.0,
-})
+ivive_microsomal(
+    clint_vitro=30.0,                  # µL/min/mg HLM
+    fu_inc=None,                       # auto-predict from logP via Austin 2002
+    logP=3.5,                          # for fu_inc prediction
+    protein_conc=1.0,                  # mg/mL
+)
 ```
 
-**Result**:
+Result:
+
 ```
 **CLint in vivo = 300.64 L/h**
 
-| Parameter | Value |
-|-----------|-------|
-| CLint_unbound_uL_min_mg | 59.35 |
-| fu_inc | 0.5055 (predicted, at logP=3.5)
-| MPPGL | 45 mg/g liver |
-| liver_weight_g | 1876 |
-| scaling_factor | 5.065 |
+| Parameter                  | Value |
+| CLint_unbound_uL_min_mg    | 59.35 |
+| fu_inc                     | 0.5055 (predicted from logP=3.5)
+| MPPGL                      | 45 mg/g liver
+| liver_weight_g             | 1876
+| scaling_factor             | 5.065
 ```
 
-**Formula**: `CLint_in_vivo = (CLint_vitro / fu_inc) × MPPGL × liver_weight × 60 / 10^6`
+> **Interactive moment.** A careful LLM will say: "The fu_inc is
+> predicted from logP via Austin 2002 — accuracy is ±2-fold at
+> logP > 4. Do you have a measured fu_inc from rapid equilibrium
+> dialysis? If not, I'll proceed with the prediction and flag it as
+> `inferred` in the audit."
 
----
-
-### B2. Predict Fg (gut bioavailability)
+### Step 3 — Predict Fg (Yang Qgut)
 
 ```python
-mcp.call_tool("predict_fg", {
-    "Peff": 4.0, "CLint_gut": 10.0, "fu_gut": 0.2,
-})
+predict_fg(Peff=4.0, CLint_gut=10.0, fu_gut=0.2)
 ```
 
-**Result**: **Fg = 0.6793** (Yang 2007 Qgut model)
-- Qgut = 4.24 L/h
-- CLperm = 5.54 L/h
+Result: Fg = 0.6793, Qgut = 4.24 L/h.
 
----
-
-### B3. Full simulation — custom compound + IVIVE
+### Step 4 — Full simulation
 
 ```python
-mcp.call_tool("run_pbpk_simulation", {
-    "name": "NewDrug",
-    "logP": 3.5, "pKa": 7.0, "fu_p": 0.1,
-    "compound_type": "neutral", "R_bp": 1.0, "mw": 400,
-    "ka": 1.5, "Fa": 0.9, "Fg": 0.7,
-    "clearance_source": "hlm",
-    "CLint_vitro_hlm": 30.0,
-    "dose_mg": 20, "route": "oral", "duration_h": 24,
-})
+run_pbpk_simulation(
+    name="NewDrug",
+    logP=3.5, pKa=7.0, fu_p=0.1, mw=400,
+    compound_type="neutral", R_bp=1.0,
+    ka=1.5, Fa=0.9, Fg=0.7,
+    clearance_source="hlm",            # ← discriminated union; HLM-mode
+    CLint_vitro_hlm=30.0,              # ← required field for "hlm"
+    dose_mg=20, route="oral", duration_h=24.0,
+    body_weight=70.0, sex="male", age=35.0,
+)
 ```
 
-**Result**: IVIVE applied automatically (`30.0 µL/min/mg → 267.2 L/h`).
-Predicted PK:
-- Cmax = 37.8 ng/mL
-- Tmax = 0.89 h
-- AUC_inf = 375 ng·h/mL
-- t½ = 17.3 h (long distribution + moderate CL)
-- CL/F = 53.27 L/h
+Result: Cmax = 37.8 ng/mL, AUC_inf = 375 ng·h/mL, t½ = 17.3 h, CL/F = 53.27 L/h.
+
+### Step 5 — Provenance footer
+
+```
+### Modelling Provenance
+> Tag every parameter as M=measured / L=literature / P=predicted / D=default
+
+**Defaults used (no user / library value):**
+- Peff not provided — Fg may be unreliable
+
+**Mechanisms NOT modelled:**
+- Active transport (OATP/MRP2/OCT2/MATE1/P-gp) — provide Km/Vmax pairs and
+  set distribution_model='permeability_limited' to enable
+
+_Audit fingerprint: `0021a841e9e47c04`_
+```
 
 ---
 
 <a id="scenario-c"></a>
-## Scenario C: Drug-Drug Interaction (DDI) assessment
+## Scenario C: Drug-drug interaction (DDI) assessment
 
-### C1. Static DDI screening
-
-For an early assessment when only in vitro Ki is available:
+### Step 1 — Static screening (in vitro Ki only)
 
 ```python
-mcp.call_tool("predict_ddi", {
-    "mechanism": "reversible", "Ki": 0.05, "I_h_u": 0.5, "fm": 0.9,
-})
+predict_ddi(
+    mechanism="reversible",
+    Ki=0.05,                           # µM
+    I_h_u=0.5,                         # µM unbound liver
+    fm=0.9,
+)
 ```
 
-**Result**: **AUC ratio = 5.50x (Strong inhibition)** [FDA 2020 classification]
+Result: **AUC ratio = 5.50× (Strong inhibition, FDA 2020)**
 
-Formula: `AUC_ratio = 1 / (fm/(1 + I/Ki) + (1-fm))`
-- R_h (I/Ki) = 11, fm = 0.9
-- R = 1 / (0.9/12 + 0.1) = 1/0.175 = 5.71 ≈ 5.50x
+The server now rejects missing required params: if you call
+`predict_ddi(mechanism="reversible")` without Ki, you get a
+structured "missing parameters" message — not a silent zero.
 
----
-
-### C2. Dynamic DDI — Ketoconazole SS + Midazolam
+### Step 2 — Dynamic DDI: ketoconazole steady-state + midazolam
 
 ```python
-mcp.call_tool("run_dynamic_ddi", {
-    "victim_name": "midazolam", "victim_dose_mg": 7.5, "victim_route": "oral",
-    "victim_first_dose_h": 72,
-    "perp_name": "Keto", "perp_dose_mg": 400, "perp_route": "oral",
-    "perp_n_doses": 5, "perp_interval_h": 24,
-    "perp_logP": 3.86, "perp_pKa": 6.5, "perp_fu_p": 0.01,
-    "perp_compound_type": "moderate_base", "perp_R_bp": 0.6,
-    "perp_mw": 531, "perp_ka": 1.0, "perp_CL_int": 150,
-    "ddi_mechanism": "combined", "Ki": 0.015, "KI": 3.0, "kinact": 1.1,
-    "fm": 0.94, "duration_h": 120,
-})
+run_dynamic_ddi(
+    victim_name="midazolam",
+    victim_dose_mg=7.5, victim_route="oral", victim_first_dose_h=72,
+    perp_name="Keto",
+    perp_dose_mg=400, perp_route="oral",
+    perp_n_doses=5, perp_interval_h=24,
+    perp_logP=3.86, perp_pKa=6.5, perp_fu_p=0.01,
+    perp_compound_type="moderate_base", perp_R_bp=0.6,
+    perp_mw=531, perp_ka=1.0, perp_CL_int=150,
+    ddi_mechanism="combined",
+    Ki=0.015, KI=3.0, kinact=1.1,      # all three required for "combined"
+    fm=0.94, duration_h=120,
+)
 ```
 
-**Result**:
-- **AUC ratio: 18.24x** (lit Olkkola 1993: ~15x)
-- **Cmax ratio: 2.38x**
-- Liver CYP3A4 at midazolam Tmax: **40.7% of baseline** (59% irreversible +
-  reversible inhibition)
+The server enforces DDI prerequisites: `ddi_mechanism="combined"`
+**requires** Ki AND (KI + kinact). Missing any → ValueError. Result:
+
+- **AUC ratio: 18.24×** (lit Olkkola 1993: ~15×)
+- **Cmax ratio: 2.38×**
+- Liver CYP3A4 at midazolam Tmax: **40.7% of baseline**
 - **Classification: Strong inhibition** (FDA 2020)
 
----
-
-### C3. Dynamic DDI — Rifampin induction
+### Step 3 — Dynamic DDI: rifampin induction
 
 ```python
-mcp.call_tool("run_dynamic_ddi", {
-    ...(Rifampin 600 mg × 8 days, Midazolam on day 8)...
-    "ddi_mechanism": "induction", "Emax": 14.0, "EC50": 0.5, "fm": 0.94,
-})
+run_dynamic_ddi(
+    ...rifampin 600 mg × 8 days, midazolam on day 8...
+    ddi_mechanism="induction",
+    Emax=14.0, EC50=0.5,               # both required for induction
+    fm=0.94,
+)
 ```
 
-**Result**:
-- **AUC ratio: 0.01x** (lit Backman 1996: 0.04-0.10)
-- Liver CYP3A4: **897% of baseline** (9x induction)
-- **Classification: Strong induction**
+Result: AUC ratio 0.01× (lit 0.04-0.10), Strong induction.
 
-> **Note**: the segmented liver (default `n_liver_segments=5`) tends to slightly
-> over-predict induction. For a more conservative prediction set
-> `n_liver_segments=1` (now exposed at the API level in v1.6).
+> **Note:** segmented liver default `n_liver_segments=5` slightly
+> over-predicts induction. Use `n_liver_segments=1` for conservative
+> estimates.
 
 ---
 
 <a id="scenario-d"></a>
 ## Scenario D: Special populations
 
-### D1. Pediatric (5-year-old, 20 kg)
+The server distinguishes the 73 kg / male / age 30 default subject
+with an **explicit warning** ("Subject defaults used") so a pediatric
+or pregnancy simulation cannot accidentally run as the reference adult.
+
+### D1 — Pediatric (5-year-old, 20 kg)
 
 ```python
-mcp.call_tool("run_pbpk_simulation", {
-    "name": "midazolam", "dose_mg": 4.0, "route": "iv_bolus",
-    "body_weight": 20, "age": 5, "duration_h": 12,
-    "kp_method": "poulin_theil",
-})
+run_pbpk_simulation(
+    name="midazolam", dose_mg=4.0, route="iv_bolus",
+    body_weight=20.0, age=5.0, sex="male",   # explicit non-default
+    duration_h=12.0, kp_method="poulin_theil",
+)
 ```
 
-**Result**:
-- Cmax = 6.31 mg/L
-- **CL/F = 11.17 L/h** (lit Reed 2001, age 5: 11-15 L/h) ✓
-- **Vss = 18.92 L** (lit 12-18 L) ✓
+Result:
+- CL/F = 11.17 L/h (lit Reed 2001, age 5: 11-15 L/h) ✓
+- Vss = 18.92 L (lit 12-18 L) ✓
 
----
-
-### D2. Pregnancy (gestational age 32 weeks, 3rd trimester)
+### D2 — Pregnancy (gestational age 32 weeks, 3rd trimester)
 
 ```python
-mcp.call_tool("pregnancy_physiology", {"gestational_age_weeks": 32})
+pregnancy_physiology(gestational_age_weeks=32)
 ```
 
-**Key changes** (vs. non-pregnant):
-- CYP3A4: **1.61x ↑** (faster metabolism for midazolam, etc.)
-- CYP1A2: 0.65x ↓
-- GFR: 1.39x ↑
-- Cardiac output: 1.34x ↑
-- Hematocrit: 0.90x ↓
+The server **range-checks GA ∈ [0, 42]** — passing GA=100 raises
+ValueError.
 
----
+Key changes vs non-pregnant:
+- CYP3A4: **1.61× ↑** (faster midazolam metabolism)
+- CYP1A2: 0.65× ↓
+- GFR: 1.39× ↑
+- Cardiac output: 1.34× ↑
 
-### D3. CKD Stage 3 (Moderate)
+### D3 — CKD Stage 3 (Moderate)
 
 ```python
-mcp.call_tool("disease_state", {"disease_type": "ckd", "stage": "moderate"})
+disease_state(disease_type="ckd", stage="moderate")
 ```
 
-**Multipliers**:
-- GFR: **0.37x ↓** (63% reduction)
-- fu_p: 1.15x ↑ (reduced protein binding)
-- CYP3A4: 0.85x ↓ (uremic toxin effect)
-- Hematocrit: 0.88x ↓
+Multipliers:
+- GFR: **0.37× ↓** (63% reduction)
+- fu_p: 1.15× ↑
+- CYP3A4: 0.85× ↓ (uremic toxin effect)
 
----
-
-### D4. Population PK (with variability)
+### D4 — Population PK (variability)
 
 ```python
-mcp.call_tool("run_population_pbpk", {
-    "name": "midazolam", "dose_mg": 7.5, "n_individuals": 50,
-    "route": "oral", "duration_h": 24,
-})
+run_population_pbpk(
+    name="midazolam", dose_mg=7.5,
+    n_individuals=50,                  # clamped to [10, 500]
+    route="oral", duration_h=24.0,
+    kp_method="poulin_theil",          # passed through to per-subject
+)
 ```
 
-**Result** (50 virtual subjects):
+50 virtual subjects:
 
 | Parameter | Median | 5th %ile | 95th %ile |
 |---|---|---|---|
 | Cmax (ng/mL) | 24.5 | 11.6 | 38.9 |
 | AUC (ng·h/mL) | 166 | 52.6 | 363 |
 
-> **Note**: in v1.5 the population tool used R&R Kp by default with no
-> `kp_method` parameter. v1.6 added `kp_method` exposure — for precise
-> prediction with lipophilic bases, pass `kp_method="poulin_theil"` or use
-> a custom compound with tuned `kp_scale`.
-
 ---
 
 <a id="scenario-e"></a>
 ## Scenario E: Transporter-driven drug (statin-like)
 
-### E1. Hepatic transporter profile lookup
+**Important:** transporter parameters are silently ignored in the
+default `perfusion_limited` distribution model. The server **warns**
+when you pass transporter Km/Vmax with the wrong distribution model.
+
+### Step 1 — Profile lookup
 
 ```python
-mcp.call_tool("transporter_clearance", {
-    "organ": "liver", "CLint_met": 20, "fu_p": 0.02, "R_bp": 0.6,
-})
+transporter_clearance(organ="liver", CLint_met=20, fu_p=0.02, R_bp=0.6)
 ```
 
-**Liver profile**:
-| Transporter | Direction | Km (µM) | Vmax | CLint |
-|---|---|---|---|---|
-| OATP1B1 | Uptake | 5.0 | 100 | 20.0 |
-| OATP1B3 | Uptake | 10.0 | 50 | 5.0 |
-| MRP2 | Efflux | 50 | 30 | 0.60 |
-| BCRP | Efflux | 20 | 20 | 1.00 |
+Liver profile: OATP1B1, OATP1B3, MRP2, BCRP. Extended-clearance CL = 10.73 L/h.
 
-Extended clearance: **CLint_overall = 10.73 L/h**
+### Step 2 — Permeability-limited simulation with OATP1B1
+
+```python
+run_pbpk_simulation(
+    name="Statin",
+    logP=4.5, pKa=4.2, fu_p=0.05,
+    compound_type="acid", R_bp=0.55, mw=410,
+    ka=2.0, Fa=0.9, Fg=1.0, CL_int=10,
+    distribution_model="permeability_limited",     # ← required for transporters
+    liver_oatp_km=1.5, liver_oatp_vmax=50.0,       # both required (XOR raises)
+    liver_mrp2_km=5.0, liver_mrp2_vmax=20.0,
+    dose_mg=40, route="oral", duration_h=48.0,
+    body_weight=70.0, sex="male", age=35.0,
+)
+```
+
+Result: Cmax = 0.87 µg/mL, AUC_inf = 45.7 mg·h/L, t½ = 37.7 h.
+
+If you forget the `distribution_model` change:
+
+> ⚠️ Transporter parameters were provided but `distribution_model=
+> "perfusion_limited"` (default). Active transport is only evaluated
+> in the permeability-limited model. Set
+> `distribution_model="permeability_limited"` to enable them, or
+> remove the transporter inputs to silence this warning.
+
+If you forget Km/Vmax pairing:
+
+```
+ValueError: Transporter 'liver_oatp' has only Km set. Both Km and
+Vmax are required to activate a transporter — providing one is
+silently ignored in the legacy schema. Provide both or neither.
+```
 
 ---
 
-### E2. Permeability-limited + OATP1B1 simulation
+<a id="scenario-f"></a>
+## Scenario F: NSAID with EHC (Diclofenac, full step-by-step)
 
-A statin-like drug (logP 4.5, acidic, highly bound):
+This is the worked case study that motivated v1.7-v2.3. Diclofenac
+(NSAID, highly-bound acid, UGT2B7-glucuronidated, undergoes EHC) is
+the kind of compound where naive defaults silently produce 10×-wrong
+Vss. This walkthrough shows the LLM-driven discovery of those
+pitfalls.
+
+### Step 0 — User intent
+
+> "Build a PBPK model for diclofenac 50 mg oral. I have hepatocyte
+> CLint = 120 µL/min/10⁶ cells from our in-house assay."
+
+### Step 1 — Compound identification
+
+LLM (or you) calls:
 
 ```python
-mcp.call_tool("run_pbpk_simulation", {
-    "name": "Statin", "logP": 4.5, "pKa": 4.2, "fu_p": 0.05,
-    "compound_type": "acid", "R_bp": 0.55, "mw": 410,
-    "ka": 2.0, "Fa": 0.9, "Fg": 1.0, "CL_int": 10,
-    "distribution_model": "permeability_limited",
-    "liver_oatp_km": 1.5, "liver_oatp_vmax": 50.0,
-    "liver_mrp2_km": 5.0, "liver_mrp2_vmax": 20.0,
-    "dose_mg": 40, "route": "oral", "duration_h": 48,
-})
+drug_properties(drug_name="diclofenac")
 ```
 
-**Result**:
-- Cmax = 0.87 µg/mL
-- AUC_inf = 45.7 mg·h/L
-- t½ = 37.7 h (OATP uptake + tissue accumulation give a long distribution phase)
-- CL/F = 0.88 L/h
+Auto-fills MW 296.15, logP 4.51, pKa 4.0 from ChEMBL (CHEMBL3).
+Diclofenac is **not** in the curated `COMPOUND_LIBRARY`, so the LLM
+must build a custom compound.
+
+### Step 2 — Measurement audit
+
+The LLM consults the Priority-1 list:
+
+| Parameter | Have measurement? | Fallback |
+|---|---|---|
+| `fu_p` | ❓ | PubMed search → Davies 1997 PMID:9106794 → fu_p = 0.005 |
+| `R_bp` | ❓ | Predict from RBC partitioning → 0.55 |
+| `Caco-2 Papp` | ❓ | Yang Qgut with Peff = 2.83 ×10⁻⁴ cm/s |
+| `fu_hep` (incubation) | ❓ | Austin 2002 from logP=4.51 → 0.186 |
+| `CLint` | ✅ | Hepatocyte 120 µL/min/10⁶ cells (user) |
+
+Citation verification on Davies 1997:
+
+```python
+verify_citation("9106794")
+```
+
+Returns: status=verified, year=1997, journal="Clin Pharmacokinet" ✓
+
+### Step 3 — Kp method selection
+
+Diclofenac is a **highly-bound acid (fu_p < 0.01)** → the server's
+selection rule recommends `berezhkovskiy` or `pksim_standard`.
+
+```python
+compare_kp_methods(
+    logP=4.51, pKa=4.0, fu_p=0.005,
+    compound_type="acid", R_bp=0.55, mw=296.15,
+)
+```
+
+The 7-method comparison shows R&R Vss=4 L (under-predicts), Berezhkovskiy
+Vss=120 L (over-predicts — also a known limitation), Schmitt is
+closest. This is the textbook "highly-bound acid is hard" case.
+
+### Step 4 — Hepatocyte IVIVE
+
+```python
+ivive_microsomal(
+    clint_vitro=120.0,                 # but really hepatocyte
+    logP=4.51,
+    protein_conc=1.0,
+)
+# Or use the dedicated hepatocyte scaler:
+# scale_hepatocyte_clint(clint_hep=120.0, logP=4.51)
+```
+
+Hepatocyte gives **CLint_in_vivo = 7184 L/h** (vs the same drug from
+HLM = 1624 L/h). The 4.4× difference is the UGT2B7 contribution that
+HLM systematically misses. The LLM should warn:
+
+> ℹ️ Hepatocyte CLint is preferred for diclofenac because UGT2B7
+> contributes ~30% of metabolism (Davies 1997). HLM-only IVIVE would
+> under-predict CL by ~5×.
+
+### Step 5 — First simulation (calibrated)
+
+```python
+run_pbpk_simulation(
+    name="Diclofenac",
+    logP=4.51, pKa=4.0, fu_p=0.005,
+    compound_type="acid", R_bp=0.55, mw=296.15,
+    ka=2.0, Fa=1.0, Fg=0.76,
+    clearance_source="hepatocyte",
+    CLint_vitro_hep=120.0,
+    CL_renal=0.1,                      # negligible (<1%)
+    dose_mg=50.0, route="oral", duration_h=24.0,
+    body_weight=70.0, sex="male", age=35.0,
+    kp_method="schmitt",
+)
+```
+
+Result vs literature (50 mg PO):
+
+| Parameter | Predicted | Clinical | Status |
+|---|---|---|---|
+| Cmax | 658 ng/mL | 1200-2500 | ↓ low |
+| AUC_inf | 1053 ng·h/mL | 1500-2500 | ↓ low |
+| t½ | 0.49 h | 1.2-2.0 | ↓ short |
+| CL/F | 47.5 L/h | ~50 | ✓ |
+| Vss | 13.0 L | 8-12 | ✓ |
+| F | 0.44 | 0.50-0.60 | ≈ |
+
+CL ✓, Vss ✓ — but t½ is too short. Why?
+
+### Step 6 — Add EHC (acyl-glucuronide deconjugation)
+
+Diclofenac forms an acyl-glucuronide that's deconjugated by gut
+β-glucuronidase, releasing parent drug back into the lumen — extending
+the apparent t½. The LLM should recognize this is the missing piece:
+
+```python
+run_pbpk_simulation(
+    ... same as above ...
+    # Enable EHC via SimulationConfig
+    # (not all flat tools expose this; the session workflow does)
+)
+```
+
+With EHC enabled (`enable_ehc=True`, `CL_bile=8`, `f_bile_parent=0.30`,
+`k_deconjugation=0.6`, `f_reabsorption=0.7`), t½ extends to **0.99 h**,
+closer to literature 1.2-2.0 h.
+
+### Step 7 — Final provenance
+
+```
+### NCA reliability
+- Extrapolation fraction: 11.4% ✓
+- Terminal-phase points: 32 ✓
+- Terminal R²: 0.991 ✓
+- Duration / t½: 24 ✓
+
+### Modelling Provenance
+**Defaults used (no user / library value):**
+- (none)
+
+**Mechanisms NOT modelled:**
+- Active transport (OATP1B3 — diclofenac is not a major substrate, OK)
+
+_Audit fingerprint: `7af1c8b2e0954d31`_
+```
+
+### Step 8 — Lessons learned
+
+1. **Hepatocyte > HLM** for any drug with non-CYP metabolism (UGT, SULT, esterase). HLM-only IVIVE under-predicts CL by 2-5×.
+2. **Highly-bound acids (fu_p < 0.01)** are the hardest Kp class. None of the 7 methods match clinical Vss perfectly; Schmitt is the most balanced.
+3. **EHC matters for terminal phase** of acyl-glucuronide-forming drugs (NSAIDs, mycophenolate). Without `enable_ehc=True`, t½ is under-predicted.
+4. Always look at **NCA reliability flags** before quoting CL/F or t½.
 
 ---
 
 <a id="kp-method-selection"></a>
-## Reference: Kp method selection rules
+## Reference: Kp method selection
 
-| Compound class | Recommended method | Rationale |
+| Compound class | Recommended | Rationale |
 |---|---|---|
-| Neutral / weak base (general) | `rodgers_rowland` | Default, broadly validated |
+| Neutral / weak base | `rodgers_rowland` | Default, broadly validated |
 | Lipophilic base (logP > 3) | `poulin_theil` | Corrects R&R adipose over-prediction |
-| Highly-bound acid (fu_p < 0.01) | `berezhkovskiy` or `pksim_standard` | R&R under-predicts acid Vss (Rodgers 2006) |
-| Hydrophilic (logP < 0) | `rodgers_rowland` | Ionic partitioning handled correctly |
+| Highly-bound acid (fu_p < 0.01) | `berezhkovskiy` or `pksim_standard` | R&R under-predicts; Berezhkovskiy corrects albumin handling |
+| Hydrophilic (logP < 0) | `rodgers_rowland` | Ionic partitioning OK |
 | Very lipophilic (logP > 5) | `kp_membrane` | Membrane binding dominates |
 
-**Decision tree**:
-1. Known compound? → if a `kp_scale` is in the library, R&R can be used as-is
-2. logP > 3 + base → PT
-3. fu_p < 0.01 + acid → Berezhkovskiy
-4. Otherwise → R&R (default)
-5. When in doubt, run `compare_kp_methods` first to inspect per-tissue Kp spread
+**Decision flow:**
+1. Library compound? → `recommended_kp_method` is auto-selected.
+2. logP > 3 + base → `poulin_theil`
+3. fu_p < 0.01 + acid → `berezhkovskiy`
+4. Otherwise → `rodgers_rowland` (default)
+5. When in doubt: call `compare_kp_methods` first.
 
 ---
 
 <a id="parameter-naming-rules"></a>
-## Reference: Parameter naming rules (important!)
+## Reference: Parameter naming rules
 
-FastMCP **silently drops** unknown kwargs. If you misspell a parameter, the
-tool will run with the default value — no warning.
+FastMCP **silently drops** unknown kwargs. Misspelled parameters fall
+back to defaults, with no warning at the protocol layer — this is why
+the server now adds explicit validation. Canonical names:
 
-### Loading a library compound
-| Tool | Parameter name |
+| Tool family | Library compound name |
 |---|---|
-| `run_pbpk_simulation`, `predict_kp`, `compare_kp_methods`, `predict_tissue_binding`, `predict_hepatic_clearance`, `compare_hepatic_clearance`, `predict_fg`, `run_population_pbpk` | `name` |
+| `run_pbpk_simulation`, `predict_kp`, `compare_kp_methods`, `predict_tissue_binding`, `predict_blood_plasma_ratio`, `predict_hepatic_clearance`, `compare_hepatic_clearance`, `predict_fg`, `run_population_pbpk` | `name` |
 | `run_dynamic_ddi` | `victim_name`, `perp_name` |
 | `drug_properties` | `drug_name` |
 
-### Other common pitfalls
 | Tool | Watch out for |
 |---|---|
-| `run_population_pbpk` | `n_individuals` (**not** `n_subjects`), clamped 10-500 |
-| `ivive_microsomal` | `clint_vitro` (**not** `CLint_vitro_hlm`) |
-| `predict_ddi` | `I_h_u` (unbound liver conc, µM), `fm`, `Ki`/`KI`/`kinact`/`Emax`/`EC50` |
-| `disease_state` | `disease_type` + `stage` (hepatic accepts mild→mild_A alias) |
-| `pregnancy_physiology` | `gestational_age_weeks` (**not** `gestational_week`) |
-| `run_pbpk_simulation` | Defaults to R&R if `kp_method` is omitted |
+| `run_population_pbpk` | `n_individuals` (NOT `n_subjects`); clamped to [10, 500] |
+| `ivive_microsomal` | `clint_vitro` (NOT `CLint_vitro_hlm`) |
+| `predict_ddi` | `I_h_u` (unbound µM), `fm`, plus mechanism-specific (`Ki`/`KI`+`kinact`/`Emax`+`EC50`) — **server rejects missing prerequisites** |
+| `disease_state` | `disease_type` + `stage` (hepatic accepts `mild` → `mild_A` alias) |
+| `pregnancy_physiology` | `gestational_age_weeks` (NOT `gestational_week`); range-checked [0, 42] |
+| `run_pbpk_simulation` | `kp_method` defaults to R&R; library compounds may auto-override |
 
 ---
 
-## Library compounds and validation status
+<a id="safety-net"></a>
+## The safety net: what the server enforces
 
-| Drug | Recommended Kp | Vss | CL | t½ | Status |
-|---|---|---|---|---|---|
-| Midazolam | PT | 0.90 L/kg | 15.4 L/h | 5.3 h | ✓ |
-| Diazepam | PT | 1.20 L/kg | 0.91 L/h | 67 h | ✓ |
-| Warfarin | Berezhkovskiy | 0.12 L/kg | 0.11 L/h | 52 h | ✓ |
-| Theophylline | R&R | 0.28 L/kg | 1.93 L/h | 7.2 h | ✓ |
-| Caffeine | R&R | 0.42 L/kg | 3.65 L/h | 5.7 h | ✓ |
-| Metformin | R&R | 1.17 L/kg | 27.2 L/h | 2.6 h* | △ |
+You don't need to remember all of this — the server enforces it. But
+if you see one of these in your output, here's what it means.
 
-*Metformin t½ is under-predicted vs. observed (4-9 h) because the library
-uses passive `CL_renal`. To reproduce the biphasic PK, use perm-limited
-distribution with tuned kidney OCT2 / MATE1 parameters.
+### Hard errors (raise ValueError before any computation)
+
+- Invalid enum (`kp_method`, `distribution_model`, `route`,
+  `absorption_model`) — closest valid option suggested
+- `clearance_source` mismatched against the IVIVE field actually
+  provided
+- Out-of-range physical parameter (`fu_p > 1`, `logP > 10`,
+  `dose_mg <= 0`, `body_weight > 300`, etc.)
+- Incomplete transporter Km/Vmax pair
+- `simulate_validated()` token forged or expired
+- DDI mechanism missing prerequisite (`reversible` → Ki, `mbi` →
+  KI+kinact, `induction` → Emax+EC50)
+- Multi-dose interval extends beyond simulation duration
+- `predict_kp()` / `simulate_acat()` / etc. called with all-default
+  args (no library + no physchem)
+- `pregnancy_physiology(GA=100)` (range check)
+- **Post-simulation dose recovery > 1% IV / 5% oral** — the ODE lost
+  or created mass; result is invalid
+- Physiology table mass-balance failure at startup (organ volumes
+  don't sum to body weight, etc.)
+
+### Soft warnings (run, but surface ⚠️ in output)
+
+- Library compound matched + custom physchem ignored
+- Transporter parameters with `perfusion_limited` distribution
+- Sentinel defaults (`fu_p=1.0`, `R_bp=1.0`)
+- Zero hepatic + zero renal clearance
+- `compound_type="neutral"` with `fu_p < 0.01` (probable acid)
+- Subject defaults (73 kg male age 30) used silently
+- NCA: extrapolation > 20%, n_terminal < 3, R² < 0.85, duration < 3× t½
+
+### Output-time provenance audit
+
+For session-built models (`register_compound` → … →
+`validate_model`), `audit_model_provenance(compound_id)` produces a
+table with one row per parameter (`Source type` ∈
+{user_provided, measurement, literature, library, default, inferred,
+UNSOURCED}, `Confidence` ∈ {high, medium, low, unverified}). Verdict:
+**passed** / **passed-with-flags** / **failed-audit**.
+
+Sentinel defaults (Fa=1.0, R_bp=1.0, etc.) are flagged ⚠️ unless a
+`*_source` was recorded. Vague labels ("typical", "literature value")
+are converted to `UNSOURCED`. Citations claimed must be verifiable
+via `verify_citation()` against PubMed/Crossref.
+
+### Audit log + replay
+
+Every successful simulation writes one JSON line to
+`data/audit.jsonl` with input fingerprint, resolved parameters,
+warnings, and NCA summary. `replay_lookup(fingerprint)` retrieves
+the record. Two calls with the same inputs produce the same
+fingerprint — non-determinism is detectable.
 
 ---
 
-## Recommended workflow
-
-```
-0. **Measurement audit** — for each Priority-1 parameter (fu_hep, fu_inc,
-   R_bp, Caco-2 Papp / Peff) and Priority-2 parameter (tissue Kp, ka,
-   EHC params), ASK the user whether a measured value exists. Use it
-   if so; otherwise fall back to literature consensus or model
-   prediction, and tag the source as M / L / P in the final table.
-     ↓
-1. [drug_properties] Look up drug information
-     ↓
-2. [compare_kp_methods] Choose a Kp method
-     ↓
-3. [run_pbpk_simulation] Run the baseline simulation
-     ↓
-4. Compare against clinical values — if Vss/CL is off by more than 2x:
-     - Switch Kp method (see Scenario A)
-     - Revisit IVIVE inputs (Scenario B)
-     - Inject literature values via kp_override
-     ↓
-5. [run_dynamic_ddi] Evaluate DDI (when applicable)
-     ↓
-6. [run_population_pbpk] Assess variability
-     ↓
-7. [fit_to_observed] Fine-tune against observed data
-```
-
-### Why Step 0 matters
-
-Predictions for `fu_hep` (Austin equation), `fu_inc`, and `R_bp`
-(Rodgers-Rowland from RBC partitioning) can differ from measurement by
-2-4× at logP > 4 or fu_p < 0.01. A 2× error in `fu_hep` propagates
-directly to a 2× error in CL. Always prefer a measured value, and be
-explicit when you fall back to prediction.
-
----
-
-*Server v1.5 / 30 tools / 25 core modules / ODE: BDF method*
-*For the full parameter guide, call the MCP tool `pbpk_help`.*
+*Server v2.3 / 42 tools / 79 fail-fast tests / ODE: BDF (atol=1e-10, rtol=1e-8)*
+*For the full parameter guide at runtime, call the MCP tool `pbpk_help`.*
+*For the full provenance audit, call `audit_model_provenance(compound_id)` after `validate_model()`.*
