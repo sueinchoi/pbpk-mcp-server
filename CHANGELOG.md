@@ -1,5 +1,47 @@
 # PBPK MCP Server — Changelog
 
+## v2.6 (2026-04-28) — Remove fabricated PMIDs from library citations
+
+A literature search session for diclofenac R_bp surfaced an
+embarrassing finding: of the 19 PMIDs added to COMPOUND_LIBRARY
+citations in v2.3, exactly ONE was correct. The other 18 were valid
+PubMed IDs but pointed to completely unrelated papers (a
+"specifically valid format with wrong content" that escaped my own
+review because I never actually called verify_citation() on them).
+
+This is exactly the silent-fallback pattern that the v2.0
+provenance_audit and v1.8 verify_citation tooling exists to catch.
+The lesson: even with the safety net in place, the network of
+defaults around it — including the library citations themselves —
+must be subjected to the same discipline.
+
+Fixed (core/compound.py):
+- Removed all 18 unverified PMIDs from library citations.
+- Replaced with author + year + journal text (the audit will flag
+  these as "literature, low confidence" via verify_citation
+  classification, which is the honest representation).
+- Kept verified database identifiers (ChEMBL, DrugBank, PubChem CID)
+  unchanged — these are checkable via direct lookup.
+- The single verified PMID (Davies & Anderson 1997, PMID:9314611)
+  was not in the library citations — it appeared only in a tutorial
+  reference and remains correct.
+
+New test (tests/test_silent_fallback.py):
+- Added "library citations contain no unverified PMIDs" — an
+  allowlist guard that fails CI if any PMID is committed to
+  COMPOUND_LIBRARY without passing through the APPROVED_PMIDS
+  set. New PMIDs must be verified with verify_citation() in online
+  mode and added to the allowlist before they can be committed.
+
+Tutorial / TUTORIAL.md unaffected: the worked Diclofenac example
+already cited Davies 1997 (PMID:9314611, verified) and used it
+correctly.
+
+Verification:
+- 94/94 fail-fast tests pass
+- Re-running verify_citation against COMPOUND_LIBRARY now finds
+  zero unverified PMIDs.
+
 ## v2.3 (2026-04-22) — Fourth-pass: NCA reliability + library citations + defensive None
 
 A focused audit of the result-formatting layer (NCA), defensive

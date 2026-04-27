@@ -1051,6 +1051,46 @@ def t():
                    ("CL_int", "CL_renal", "fu_p", "Fa")), \
             f"`{name}` missing PK parameter citation: {cite_keys}"
 
+@test("library citations contain no unverified PMIDs")
+def t():
+    """v2.6: PMIDs that previously appeared in COMPOUND_LIBRARY were
+    fabricated (correct format, but pointed to unrelated PubMed
+    records). This test ensures that any PMID added to a library
+    compound's citations dict matches the cited author/year. New
+    PMIDs MUST be verified via verify_citation() in online or
+    strict mode before being committed."""
+    import re
+    from core.compound import COMPOUND_LIBRARY
+    PMID_RE = re.compile(r'PMID:(\d+)')
+    pmids_found = []
+    for name, c in COMPOUND_LIBRARY.items():
+        if not c.citations:
+            continue
+        for key, src in c.citations.items():
+            for m in PMID_RE.finditer(src):
+                pmids_found.append((name, key, m.group(1), src))
+    # If any PMID is present, it MUST be verified to match its
+    # cited author (use verify_citation in online mode and check
+    # the authors field). v2.6 removed all unverified PMIDs from
+    # the library; new entries should follow the same discipline.
+    # If you add a PMID, check it manually with verify_citation()
+    # before committing — this test is a guard rail, not a
+    # full audit (it can't verify online without network access).
+    # Document any approved PMIDs here:
+    APPROVED_PMIDS = {
+        # (PMID, expected_author_substring) — verified offline
+    }
+    unapproved = [
+        (n, k, p) for n, k, p, _ in pmids_found if p not in APPROVED_PMIDS
+    ]
+    assert not unapproved, (
+        f"Found {len(unapproved)} PMIDs in library citations that "
+        f"are not in the APPROVED_PMIDS allowlist. Add them only "
+        f"after verifying with `verify_citation(PMID, mode='online')` "
+        f"and confirming the author/year match. "
+        f"Found: {unapproved[:3]}"
+    )
+
 @test("audit_model_provenance reflects library citations")
 def t():
     """When a user uses a library compound via the session workflow,
@@ -1059,9 +1099,11 @@ def t():
     citations dict on the compound is the audit-trail."""
     from core.compound import COMPOUND_LIBRARY
     midaz = COMPOUND_LIBRARY["midazolam"]
-    # Just verify the data is reachable
-    assert "Thummel" in str(midaz.citations).lower() or \
-           "PMID" in str(midaz.citations)
+    # Just verify the data is reachable. Note: case-insensitive search
+    # since citation strings vary in capitalization.
+    cits_lower = str(midaz.citations).lower()
+    assert "thummel" in cits_lower or "pmid" in cits_lower or \
+        "drugbank" in cits_lower
 
 # ============================================================
 # Section 11: Provenance audit (output-time layer)

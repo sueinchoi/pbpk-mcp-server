@@ -155,14 +155,19 @@ COMPOUND_LIBRARY = {
         R_bp=0.66, ka=4.16, Fa=0.88, Fg=0.57,
         CL_int=700.0,  # gives CL_h ~27 L/h (lit: 18-30 L/h, Thummel 1996)
         citations={
+            # Verified database identifiers (preferred when PMIDs are uncertain).
             "logP":  "ChEMBL CHEMBL601",
             "pKa":   "DrugBank DB00683",
-            "fu_p":  "PMID:8730549 (Thummel 1996)",
-            "CL_int": "calibrated to PMID:8730549 (Thummel 1996) CL 18-30 L/h",
-            "Fa":    "PMID:6705445 (Greenblatt 1984)",
-            "Fg":    "PMID:8730549 (Thummel 1996)",
-            "kp_scale": "PMID:11283499 (Bjorkman 2001) tissue distribution",
-            "recommended_kp_method": "PMID:18602900 (Jansson 2008), PMID:22512336 (Graham 2012)",
+            # Free-text references — author+year+journal only. The
+            # provenance audit will flag these as UNSOURCED until a
+            # verified PMID is added (use verify_citation() before
+            # inserting any PMID here).
+            "fu_p":  "Thummel et al. 1996, J Pharmacol Exp Ther",
+            "CL_int": "calibrated to Thummel et al. 1996 CL 18-30 L/h",
+            "Fa":    "Greenblatt et al. 1984 midazolam PK review",
+            "Fg":    "Thummel et al. 1996 first-pass extraction",
+            "kp_scale": "Bjorkman 2001 rat tissue distribution",
+            "recommended_kp_method": "Jansson 2008 / Graham 2012 — R&R adipose over-prediction",
         },
         # Empirical Kp corrections from Björkman 2001 in vivo rat data
         # (tissue:plasma total concentration), scaled to normalize R&R prediction
@@ -191,9 +196,9 @@ COMPOUND_LIBRARY = {
         citations={
             "logP":  "DrugBank DB00331",
             "pKa":   "DrugBank DB00331 (biguanide)",
-            "fu_p":  "PMID:14657959 (Graham 2011) — negligible plasma binding",
-            "Fa":    "PMID:472547 (Pentikainen 1979) ~50-60% absorbed",
-            "CL_renal": "calibrated to PMID:472547 (Pentikainen 1979) CL ~30 L/h",
+            "fu_p":  "Graham et al. 2011 metformin clinical PK review — negligible plasma binding",
+            "Fa":    "Pentikainen et al. 1979, Eur J Clin Pharmacol — ~50-60% absorbed",
+            "CL_renal": "calibrated to Pentikainen et al. 1979 CL ~30 L/h",
         },
     ),
     "theophylline": CompoundSpec(
@@ -204,8 +209,8 @@ COMPOUND_LIBRARY = {
         citations={
             "logP": "DrugBank DB00277",
             "pKa": "DrugBank DB00277",
-            "fu_p": "PMID:564917 (Ogilvie 1978)",
-            "CL_int": "calibrated to PMID:564917 (Ogilvie 1978) CL 2-4 L/h",
+            "fu_p": "Ogilvie 1978, Clin Pharmacokinet theophylline review",
+            "CL_int": "calibrated to Ogilvie 1978 CL 2-4 L/h",
         },
     ),
     "diazepam": CompoundSpec(
@@ -217,9 +222,9 @@ COMPOUND_LIBRARY = {
         citations={
             "logP": "DrugBank DB00829",
             "pKa": "DrugBank DB00829",
-            "fu_p": "PMID:7363485 (Greenblatt 1980)",
-            "CL_int": "calibrated to PMID:7363485 (Greenblatt 1980) CL 1.3-2.2 L/h",
-            "recommended_kp_method": "PMID:18602900 (Jansson 2008)",
+            "fu_p": "Greenblatt et al. 1980 diazepam PK review",
+            "CL_int": "calibrated to Greenblatt et al. 1980 CL 1.3-2.2 L/h",
+            "recommended_kp_method": "Jansson 2008 — R&R lipophilic-base adipose over-prediction",
         },
     ),
     "warfarin": CompoundSpec(
@@ -236,9 +241,9 @@ COMPOUND_LIBRARY = {
         citations={
             "logP": "DrugBank DB00682",
             "pKa": "DrugBank DB00682",
-            "fu_p": "PMID:3536469 (Holford 1986)",
-            "CL_int": "calibrated to PMID:3536469 (Holford 1986) CL 0.1-0.3 L/h",
-            "recommended_kp_method": "PMC4015127 (Berezhkovskiy 2004)",
+            "fu_p": "Holford 1986, Clin Pharmacokinet warfarin review",
+            "CL_int": "calibrated to Holford 1986 CL 0.1-0.3 L/h",
+            "recommended_kp_method": "Berezhkovskiy 2004, J Pharm Sci — albumin-corrected PT",
         },
     ),
     "caffeine": CompoundSpec(
@@ -248,8 +253,8 @@ COMPOUND_LIBRARY = {
         citations={
             "logP": "DrugBank DB00201",
             "pKa": "DrugBank DB00201",
-            "fu_p": "PMID:4029615 (Bonati 1985)",
-            "CL_int": "calibrated to PMID:4029615 (Bonati 1985)",
+            "fu_p": "Bonati et al. 1985 caffeine PK review",
+            "CL_int": "calibrated to Bonati et al. 1985 PK data",
         },
     ),
 }
