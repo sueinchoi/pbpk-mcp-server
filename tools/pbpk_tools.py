@@ -83,6 +83,9 @@ from core.protein_binding import (
 from core.population import run_population_simulation, PopulationResult
 from core.species import (
     Species, SPECIES_DATA, scale_preclinical_to_human, format_species_comparison,
+    fu_corrected_allometry, vertical_allometry_brain_weight,
+    mahmood_rule_of_exponents,
+    BRAIN_WEIGHT_G, MLP_YEARS,
 )
 from core.disease_states import (
     CKDStage, ChildPugh, format_disease_profile,
@@ -1622,7 +1625,199 @@ def register_pbpk_tools(mcp: FastMCP):
             f"| CL (L/h) | {CL_animal:.4g} | {result['CL_human_L_per_h']:.4g} |",
             f"| Vss (L) | {Vss_animal:.4g} | {result['Vss_human_L']:.4g} |",
             f"| t½ (h) | — | {result['t_half_human_h']:.2f} |",
+            "",
+            "_Note: simple BW^0.75 / BW^1.0 scaling assumes conserved fu_p "
+            "and Kp across species. For highly-bound drugs (fu_p < 0.05) "
+            "with cross-species fu differences, use "
+            "`fu_corrected_allometric_scaling`. For ≥3 species data, use "
+            "`mahmood_rule_of_exponents`._",
         ]
+        return "\n".join(lines)
+
+    @mcp.tool()
+    def fu_corrected_allometric_scaling(
+        CL_animal: float,
+        BW_animal: float,
+        fu_animal: float,
+        fu_human: float,
+        BW_human: float = 73.0,
+        exponent: float = 0.75,
+    ) -> str:
+        """
+        Fu-corrected single-species allometric scaling (Tang & Mayersohn 2005).
+
+        For drugs where fu_p differs across species (e.g. warfarin: rat
+        fu ~0.04 vs human fu ~0.005, an 8× difference), naive BW^0.75
+        scaling is systematically wrong. This tool multiplies the simple
+        allometric prediction by the unbound-fraction ratio:
+
+            CL_human = CL_animal × (BW_h/BW_a)^b × (fu_human/fu_animal)
+
+        ANTI-FABRICATION: do not pass placeholder fu values — the
+        correction factor scales linearly with them. Provide measured
+        or literature fu_p for both species.
+
+        Reference: Tang H, Mayersohn M. Drug Metab Dispos 2005;33:1294.
+        """
+        result = fu_corrected_allometry(
+            CL_animal, BW_animal, fu_animal, fu_human,
+            BW_human=BW_human, exponent=exponent,
+        )
+        return (
+            f"## Fu-corrected Allometric Scaling (Tang 2005)\n\n"
+            f"| Parameter | Value |\n"
+            f"|-----------|-------|\n"
+            f"| CL_animal (L/h) | {CL_animal:.4g} |\n"
+            f"| BW_animal (kg) | {BW_animal:.3g} |\n"
+            f"| fu_animal | {fu_animal:.4g} |\n"
+            f"| fu_human | {fu_human:.4g} |\n"
+            f"| Allometric exponent | {exponent} |\n"
+            f"| Naive CL_human (no fu correction) | "
+            f"{result['CL_human_naive_L_per_h']:.4g} L/h |\n"
+            f"| **fu correction factor (fu_h/fu_a)** | "
+            f"**{result['fu_correction_factor']:.4g}** |\n"
+            f"| **Corrected CL_human** | **{result['CL_human_L_per_h']:.4g} L/h** |\n"
+            f"\n_Method: {result['method']}_\n"
+        )
+
+    @mcp.tool()
+    def vertical_allometric_scaling(
+        CL_animal: float,
+        BW_animal: float,
+        species: str = "rat",
+        BW_human: float = 73.0,
+    ) -> str:
+        """
+        Vertical allometry with brain weight correction (Mahmood 1996).
+
+        For drugs whose simple-allometry exponent falls in 0.7-1.0
+        (typical of moderate-to-high hepatic CL drugs), the Rule of
+        Exponents recommends multiplying by brain weight:
+
+            CL_human = CL_animal × (BW_h × BrW_h) / (BW_a × BrW_a)
+
+        Reference brain weights: mouse 0.4 g, rat 1.8 g, dog 72 g,
+        monkey 95 g, human 1400 g.
+
+        Use this when the standard `allometric_scaling` over- or
+        under-predicts and you suspect brain-weight scaling applies
+        (high CL, multi-species data unavailable for full ROE).
+
+        Reference: Mahmood I, Balian JD. Xenobiotica 1996;26:887.
+        """
+        sp = Species(species)
+        result = vertical_allometry_brain_weight(
+            CL_animal, BW_animal, sp, BW_human=BW_human,
+        )
+        return (
+            f"## Vertical Allometry × Brain Weight (Mahmood 1996)\n\n"
+            f"| Parameter | Value |\n"
+            f"|-----------|-------|\n"
+            f"| Species | {sp.value} |\n"
+            f"| CL_animal (L/h) | {CL_animal:.4g} |\n"
+            f"| BW_animal (kg) | {BW_animal:.3g} |\n"
+            f"| BrW_animal (g) | {result['BrW_animal_g']:.1f} |\n"
+            f"| BW_human (kg) | {BW_human:.1f} |\n"
+            f"| BrW_human (g) | {result['BrW_human_g']:.1f} |\n"
+            f"| Scaling factor | {result['scaling_factor']:.4g} |\n"
+            f"| **Predicted CL_human** | **{result['CL_human_L_per_h']:.4g} L/h** |\n"
+            f"\n_Method: {result['method']}_\n"
+            f"\n_Note: when ≥3 species data is available, prefer "
+            f"`mahmood_rule_of_exponents` — the multi-species fit "
+            f"chooses MLP vs brain-weight correction by the empirical "
+            f"exponent rather than assuming brain weight a priori._\n"
+        )
+
+    @mcp.tool()
+    def mahmood_rule_of_exponents_scaling(
+        species_data_csv: str,
+        BW_human: float = 73.0,
+    ) -> str:
+        """
+        Multi-species allometric scaling with Rule of Exponents
+        (Mahmood & Balian 1996).
+
+        Workflow:
+          1. Fit log(CL) = log(a) + b·log(BW) across ≥3 species.
+          2. Choose correction by exponent b:
+               b < 0.55       → simple allometry
+               0.55 ≤ b ≤ 0.70 → MLP correction (lifespan)
+               0.70 < b ≤ 1.00 → brain-weight correction
+               b > 1.00       → INAPPLICABLE (do not use result)
+          3. Refit in the corrected coordinate, predict human CL.
+
+        Args:
+            species_data_csv: comma-separated triples
+                "species:CL_L_per_h:BW_kg, ..."
+                e.g. "mouse:0.05:0.025, rat:0.4:0.25, dog:8.0:10"
+                Need ≥ 3 entries from {mouse, rat, dog, monkey, human}.
+            BW_human: target human BW (kg).
+
+        ANTI-FABRICATION: do not pass made-up CL values. Use actual
+        observed clearances from preclinical PK studies; cite each
+        in your downstream provenance audit.
+
+        Reference: Mahmood I, Balian JD. Xenobiotica 1996;26:887-895.
+        """
+        # Parse "species:CL:BW, species:CL:BW" string
+        triples: list[tuple[Species, float, float]] = []
+        for raw in species_data_csv.split(","):
+            entry = raw.strip()
+            if not entry:
+                continue
+            parts = entry.split(":")
+            if len(parts) != 3:
+                raise ValueError(
+                    f"Malformed entry '{entry}'. Expected "
+                    f"'species:CL_L_per_h:BW_kg' separated by colons."
+                )
+            sp_name, cl_s, bw_s = (p.strip() for p in parts)
+            try:
+                sp = Species(sp_name.lower())
+            except ValueError:
+                raise ValueError(
+                    f"Unknown species '{sp_name}' in entry '{entry}'. "
+                    f"Use one of: mouse, rat, dog, monkey, human."
+                )
+            triples.append((sp, float(cl_s), float(bw_s)))
+
+        if len(triples) < 3:
+            raise ValueError(
+                f"Mahmood ROE requires ≥3 species; got {len(triples)}. "
+                f"Use `fu_corrected_allometric_scaling` or "
+                f"`vertical_allometric_scaling` for single-species data."
+            )
+
+        result = mahmood_rule_of_exponents(triples, BW_human=BW_human)
+
+        # Build report
+        lines = ["## Mahmood Rule of Exponents (multi-species allometry)\n"]
+        lines.append("### Input data\n")
+        lines.append("| Species | CL (L/h) | BW (kg) | BrW (g) | MLP (y) |")
+        lines.append("|---------|----------|---------|---------|---------|")
+        for sp, cl, bw in triples:
+            lines.append(
+                f"| {sp.value} | {cl:.4g} | {bw:.3g} | "
+                f"{BRAIN_WEIGHT_G[sp]:.1f} | {MLP_YEARS[sp]:.1f} |"
+            )
+        lines.append("")
+        lines.append("### Fit + Rule of Exponents\n")
+        lines.append("| Parameter | Value |")
+        lines.append("|-----------|-------|")
+        lines.append(f"| Simple-allometry exponent (b) | "
+                     f"{result['exponent_simple']:.4f} |")
+        lines.append(f"| Simple-allometry intercept (a) | "
+                     f"{result['intercept_simple']:.4g} |")
+        lines.append(f"| Simple-allometry R² | {result['r2_simple']:.4f} |")
+        lines.append(f"| Method chosen | {result['method']} |")
+        lines.append(f"| Applicability | {result['applicability']} |")
+        lines.append(f"| **Predicted CL_human (L/h)** | "
+                     f"**{result['CL_human_L_per_h']:.4g}** |")
+        if result["notes"]:
+            lines.append(f"\n_{result['notes']}_")
+        if result["applicability"] == "fail":
+            lines.append("\n⚠️ **Do NOT use this prediction for human dosing.** "
+                         "The Rule of Exponents flagged this case as unreliable.")
         return "\n".join(lines)
 
     # ----------------------------------------------------------------

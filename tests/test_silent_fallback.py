@@ -309,10 +309,10 @@ def t():
     )
     assert "⚠️" not in out, f"unexpected warning:\n{out}"
 
-@test("42 tools registered (30 PBPK + 10 session/audit + 2 citation)")
+@test("45 tools registered (33 PBPK + 10 session/audit + 2 citation)")
 def t():
     tools = _server()
-    assert len(tools) == 42, f"expected 42 tools, got {len(tools)}"
+    assert len(tools) == 45, f"expected 45 tools, got {len(tools)}"
 
 # ============================================================
 # Section 6: Determinism — same input → same NCA result
@@ -818,6 +818,95 @@ def t():
         CL_animal=2.5, Vss_animal=1.2, BW_animal=0.3, species="rat",
     )
     assert "Allometric" in out
+
+@test("fu_corrected_allometric_scaling — warfarin rat→human (8x fu diff)")
+def t():
+    tools = _server()
+    # Warfarin: rat fu_p ≈ 0.04, human fu_p ≈ 0.005 → 8x correction
+    out = tools["fu_corrected_allometric_scaling"].fn(
+        CL_animal=0.05,            # rat CL_h ~0.05 L/h
+        BW_animal=0.25,
+        fu_animal=0.04,
+        fu_human=0.005,
+        BW_human=70.0,
+    )
+    assert "Tang" in out or "fu correction" in out.lower()
+    assert "0.005" in out and "0.04" in out
+    # Naive prediction × (0.005/0.04) = naive × 0.125 (8× lower)
+    # Should report both naive and corrected
+
+@test("fu_corrected_allometric_scaling rejects fu_p > 1.0")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["fu_corrected_allometric_scaling"].fn(
+            CL_animal=1.0, BW_animal=0.25, fu_animal=1.5, fu_human=0.5,
+        ),
+        ValueError, "fu_animal",
+    )
+
+@test("vertical_allometric_scaling rat→human (brain weight)")
+def t():
+    tools = _server()
+    out = tools["vertical_allometric_scaling"].fn(
+        CL_animal=0.5, BW_animal=0.25, species="rat", BW_human=70.0,
+    )
+    assert "Brain Weight" in out or "brain weight" in out.lower()
+    assert "1400" in out or "1.4e+03" in out  # human brain weight
+
+@test("mahmood_rule_of_exponents — 3 species → chooses correction")
+def t():
+    tools = _server()
+    # Made-up but realistic-shape data: CL roughly ~ BW^0.75 → simple
+    out = tools["mahmood_rule_of_exponents_scaling"].fn(
+        species_data_csv="mouse:0.01:0.025, rat:0.05:0.25, dog:1.0:10",
+        BW_human=70.0,
+    )
+    assert "Rule of Exponents" in out
+    assert "Predicted CL_human" in out
+    # Exponent should fall in a known band
+    assert any(t in out for t in ("simple allometry", "MLP", "Brain-weight", "INAPPLICABLE"))
+
+@test("mahmood_rule_of_exponents requires ≥3 species")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["mahmood_rule_of_exponents_scaling"].fn(
+            species_data_csv="mouse:0.01:0.025, rat:0.05:0.25",
+        ),
+        ValueError, "≥3",
+    )
+
+@test("mahmood ROE flags INAPPLICABLE when exponent > 1.0")
+def t():
+    tools = _server()
+    # CL grows faster than BW^1.0 — shouldn't happen for normal drugs but
+    # can be constructed: CL doubling per 4× BW gap
+    out = tools["mahmood_rule_of_exponents_scaling"].fn(
+        species_data_csv="mouse:0.001:0.025, rat:0.5:0.25, dog:200:10",
+        BW_human=70.0,
+    )
+    assert "INAPPLICABLE" in out and "Do NOT use" in out
+
+@test("mahmood ROE rejects malformed CSV")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["mahmood_rule_of_exponents_scaling"].fn(
+            species_data_csv="mouse=0.01=0.025, rat:0.05:0.25, dog:1.0:10",
+        ),
+        ValueError, "Malformed",
+    )
+
+@test("mahmood ROE rejects unknown species")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["mahmood_rule_of_exponents_scaling"].fn(
+            species_data_csv="hamster:0.01:0.1, rat:0.05:0.25, dog:1.0:10",
+        ),
+        ValueError, "Unknown species",
+    )
 
 # ============================================================
 # Section 10d: Fourth-pass — NCA reliability, name=None, citations
