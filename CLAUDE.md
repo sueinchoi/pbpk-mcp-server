@@ -52,7 +52,7 @@ server.py
 - EHC bile/gallbladder cycle (`core/ehc.py`)
 - Lymphatic uptake (`core/lymphatic.py`)
 - Permeability-limited 3-subcompartment organs (`core/pbpk_model.py`, alternate RHS)
-- Transporter ODE (OATP/MRP2/OCT2/MATE1/P-gp, Michaelis-Menten — `core/transporters.py`)
+- Transporter ODE (OATP/MRP2/OCT2/MATE1/P-gp, Michaelis-Menten — `core/transporters.py`). **Only active when `distribution_model="permeability_limited"`** — perfusion-limited model silently ignores transporter parameters because it has no vascular/cell separation. See MODEL_DESCRIPTION.md §7.5.
 
 Mass conservation is the primary correctness check. Two historical bugs to be aware of (see CHANGELOG v1.3, v1.4): (1) perfusion-limited LUNG flow must come from `Qco` not from `self._Q` (which excludes LUNG); (2) perm-limited liver portal inflow must include pancreas, otherwise inert drug loses ~70% mass.
 

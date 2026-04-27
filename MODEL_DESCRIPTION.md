@@ -71,13 +71,27 @@ For compounds where membrane permeability is rate-limiting (typically large mole
 - **Interstitial** ($V_{int}$): extracellular, extravascular space
 - **Intracellular** ($V_{cell}$): intracellular space
 
-$$\frac{dA_{vas}}{dt} = Q_t (C_{in} - C_{vas}) - PA_{endo} (f_{u,p} \cdot C_{vas}/R_{bp} - f_{u,int} \cdot C_{int})$$
+**Generic non-eliminating organ:**
+
+$$\frac{dA_{vas}}{dt} = Q_t (C_{in} - C_{vas}) - PA_{endo} (f_{u,p} \cdot C_{vas}/R_{bp} - f_{u,int} \cdot C_{int}) - J_{uptake}$$
 
 $$\frac{dA_{int}}{dt} = PA_{endo} (f_{u,p} \cdot C_{vas}/R_{bp} - f_{u,int} \cdot C_{int}) - PA_{cell} (f_{u,int} \cdot C_{int} - f_{u,cell} \cdot C_{cell})$$
 
-$$\frac{dA_{cell}}{dt} = PA_{cell} (f_{u,int} \cdot C_{int} - f_{u,cell} \cdot C_{cell})$$
+$$\frac{dA_{cell}}{dt} = PA_{cell} (f_{u,int} \cdot C_{int} - f_{u,cell} \cdot C_{cell}) + J_{uptake} - J_{efflux}$$
 
-where $PA_{endo}$ and $PA_{cell}$ are the permeability-surface area products for endothelial and cell membranes, respectively, and $f_{u,int}$ and $f_{u,cell}$ are the unbound fractions in interstitial and intracellular spaces. For oral dosing, absorbed drug enters the intracellular sub-compartment of the gut wall (enterocyte).
+where $PA_{endo}$ and $PA_{cell}$ are the permeability-surface area products for endothelial and cell membranes, respectively, and $f_{u,int}$ and $f_{u,cell}$ are the unbound fractions in interstitial and intracellular spaces. The active transport fluxes $J_{uptake}$ and $J_{efflux}$ are zero unless transporters are specified for the organ (see §7.5). For oral dosing, absorbed drug enters the intracellular sub-compartment of the gut wall (enterocyte).
+
+**Liver (with hepatic metabolism in the intracellular sub-compartment):**
+
+$$\frac{dA_{cell,liver}}{dt} = PA_{cell}(f_{u,int} C_{int} - f_{u,cell} C_{cell}) + J_{uptake} - J_{efflux} - CL_{int} \cdot f_{u,cell} \cdot C_{cell}$$
+
+For Michaelis-Menten kinetics the metabolism term is $V_{max} \cdot C_{u,cell} / (K_m + C_{u,cell})$ with $C_{u,cell} = f_{u,cell} \cdot C_{cell}$. The portal-vein dual input ($Q_{HA} \cdot C_{art} + Q_{portal} \cdot C_{portal}$) replaces $Q_t \cdot C_{in}$ in the liver vascular equation, with portal organs (gut, spleen, pancreas) draining into the liver vascular pool to preserve mass balance.
+
+**Kidney (with renal clearance):**
+
+$$\frac{dA_{vas,kidney}}{dt} = Q_{kidney}(C_{art} - C_{vas}) - PA_{endo}(f_{u,p} C_{vas}/R_{bp} - f_{u,int} C_{int}) - J_{uptake} - CL_{renal} \cdot \frac{C_{vas}/R_{bp}}{Kp_{kidney}}$$
+
+The $CL_{renal}$ term acts on tissue-equilibrated plasma ($C_{vas}/R_{bp}/Kp_{kidney}$) so that the same numerical $CL_{renal}$ input gives equivalent elimination in perfusion- and permeability-limited models. Active tubular secretion (OCT2, MATE1, OAT1/3) is handled separately through transporter $J_{uptake}$ on the vascular side and $J_{efflux}$ to lumen on the cell side (see §7.5).
 
 ## 3. System Parameters (Physiology)
 
@@ -230,6 +244,25 @@ For transporter-mediated clearance:
 $$CL_{int,overall} = \frac{PS_{inf} (CL_{int,met} + CL_{bile})}{PS_{inf} + CL_{int,met} + CL_{bile} + PS_{eff}}$$
 
 $$Kp_{uu,liver} = \frac{PS_{inf}}{PS_{eff} + CL_{int,met} + CL_{bile}}$$
+
+### 7.5 Active Transport in the ODE (dynamic form)
+
+Section 7.4 gives the steady-state algebraic relationship. The PBPK ODE itself implements transporter activity dynamically using saturable Michaelis-Menten kinetics on **unbound** concentrations at each membrane (Shitara et al., 2006; Giacomini et al., 2010). For an organ with $N_{inf}$ uptake transporters on the basolateral/sinusoidal membrane and $N_{eff}$ efflux transporters on the apical/canalicular membrane:
+
+$$J_{uptake} = V_{cell} \cdot \sum_{i=1}^{N_{inf}} \frac{V_{max,i} \cdot C_{u,vas}}{K_{m,i} + C_{u,vas}}$$
+
+$$J_{efflux} = V_{cell} \cdot \sum_{j=1}^{N_{eff}} \frac{V_{max,j} \cdot C_{u,cell}}{K_{m,j} + C_{u,cell}}$$
+
+where $C_{u,vas} = f_{u,p} \cdot C_{vas} / R_{bp}$ is the unbound vascular plasma concentration and $C_{u,cell} = f_{u,cell} \cdot C_{cell}$ is the unbound intracellular concentration. The volume scaling factor $V_{cell}$ converts the intensive rate (concentration/time) into an extensive flux (amount/time) consistent with the ODE state representation. Concentrations are converted to µM internally before evaluating the saturation term, then the rate is converted back to mg/h via the molecular weight.
+
+**Coupling into the ODE.** The transporter fluxes attach to the vascular and intracellular sub-compartments only — the interstitial sub-compartment is bypassed since carriers operate at cellular membranes:
+
+- $dA_{vas}/dt \mathrel{-}= J_{uptake}$
+- $dA_{cell}/dt \mathrel{+}= J_{uptake} - J_{efflux}$
+
+**Activation.** Transporter terms are evaluated **only when the permeability-limited distribution model is active**. In the default perfusion-limited model the organ is a single well-stirred compartment with no vascular/cellular separation, so transporter parameters are silently ignored. This is intentional — perfusion-limited assumes equilibrium across membranes within each organ, which is incompatible with rate-limited active transport. To use transporters, set `distribution_model="permeability_limited"` in `run_pbpk_simulation`.
+
+**Supported transporters and locations.** Hepatic uptake (OATP1B1, OATP1B3, OATP2B1, NTCP) and biliary efflux (MRP2, BCRP, P-gp); renal basolateral uptake (OCT2, OAT1, OAT3) and apical efflux (MATE1, MATE2-K, P-gp); intestinal apical efflux (P-gp, BCRP); blood-brain barrier efflux (P-gp). Direction is controlled by the `TransportDirection` enum (see `core/transporters.py`) which selects whether the carrier acts on the vascular→cell or cell→lumen interface.
 
 ## 8. Fg Prediction
 
