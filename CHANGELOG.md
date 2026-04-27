@@ -1,5 +1,44 @@
 # PBPK MCP Server — Changelog
 
+## v1.7 (2026-04-22) — Server-side safety architecture
+
+Schema and invariant enforcement against silent-fallback patterns
+discovered during the Diclofenac case study and a structured audit
+of all 30 tools.
+
+### New
+- `core/clearance_spec.py` — Pydantic discriminated union for the
+  five clearance sources (direct, hlm, hepatocyte, rcyp). Required
+  fields per variant are now enforced at schema level. Previously
+  `clearance_source="hlm"` with `CLint_vitro_hep` provided silently
+  ran with `CL_int=0`.
+- `core/transporter_spec.py` — pairs Km/Vmax at schema level. XOR
+  (only Km or only Vmax) raises with the offending pair name.
+- `core/invariants.py` — physiological ranges for every parameter
+  (fu_p ∈ [1e-5, 1.0], logP ∈ [-5, 10], etc.) plus mass-balance
+  checks for the physiology tables.
+- `core/audit.py` — append-only JSONL log at `data/audit.jsonl` with
+  input fingerprint, resolved parameters, warnings, NCA summary.
+- `tests/test_silent_fallback.py` — 24-case fail-fast suite
+  (invalid enums, mismatched clearance source, out-of-range values,
+  transporter pair completeness, soft-warning surfacing, known-good
+  workflows, determinism). Run via
+  `python -m tests.test_silent_fallback`.
+
+### Changed
+- `run_pbpk_simulation` rejects (instead of silently coercing):
+  - invalid `kp_method` strings (suggests closest valid option)
+  - mismatched `clearance_source` vs. supplied IVIVE input
+  - any physicochemical value outside its physiological range
+  - incomplete transporter Km/Vmax pairs
+  - multi-dose regimens whose interval × n_doses exceeds duration
+- Output now includes a "Modelling Provenance" footer enumerating
+  defaults used, mechanisms not modelled, and an audit fingerprint.
+- `get_physiology` runs mass-balance invariants at startup; corrupt
+  physiology tables fail with an actionable message.
+- Top-tier tool docstrings carry an explicit anti-fabrication
+  instruction.
+
 ## v1.6 (2026-04-25) — Deployment release
 
 ### UX 개선 (3rd-party 평가 후)

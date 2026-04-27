@@ -475,6 +475,39 @@ def get_physiology(
     Q_liver_total = Q_ha + Q_portal
     blood_flows[Organ.LIVER] = Q_liver_total
 
+    # --- Mass-balance invariants ---
+    # Blood flow fractions of organs receiving from arterial blood must
+    # sum to ~1.0 (cardiac output). Liver flow is portal+HA so we count
+    # the parallel-to-arterial set: all non-liver, non-lung organs + Q_HA.
+    flow_check = {
+        o: blood_flows[o] / cardiac_output for o in blood_flows
+        if o not in (Organ.LIVER, Organ.LUNG, Organ.GUT, Organ.SPLEEN,
+                     Organ.PANCREAS)
+    }
+    flow_check["hepatic_artery"] = Q_ha / cardiac_output
+    flow_check["portal_drainage"] = Q_portal / cardiac_output
+    from .invariants import (
+        check_blood_flow_balance, check_organ_volume_balance,
+    )
+    bf_violation = check_blood_flow_balance(flow_check, tolerance=0.05)
+    if bf_violation is not None:
+        raise ValueError(
+            f"Physiology mass-balance failure: {bf_violation.parameter}="
+            f"{bf_violation.value}, expected {bf_violation.expected}. "
+            f"This usually means BLOOD_FLOWS in core/physiology.py was "
+            f"edited without preserving Σ = 1.0."
+        )
+    vol_violation = check_organ_volume_balance(
+        organ_volumes, body_weight, tolerance=0.15,
+    )
+    if vol_violation is not None:
+        raise ValueError(
+            f"Physiology mass-balance failure: {vol_violation.parameter}="
+            f"{vol_violation.value}, expected {vol_violation.expected}. "
+            f"This usually means ORGAN_VOLUMES in core/physiology.py was "
+            f"edited without preserving Σ ≈ body weight."
+        )
+
     return PhysiologyParams(
         body_weight=body_weight,
         sex=sex,

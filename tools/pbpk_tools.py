@@ -135,6 +135,11 @@ def register_pbpk_tools(mcp: FastMCP):
         """
         Predict tissue:plasma partition coefficients (Kp).
 
+        ANTI-FABRICATION: do not pass placeholder or "typical" physicochemical
+        values. The server enforces physiological ranges; out-of-range
+        rejects. If the user has not supplied logP/pKa/fu_p/R_bp, ask
+        them or use `name` of a library compound — do not guess.
+
         Five methods available:
           - rodgers_rowland: R&R (2005/2006), mechanistic, Ka_AP from RBC
           - schmitt: Schmitt (2008), 3 lipid sub-fractions, AP binding 20x for bases
@@ -381,6 +386,18 @@ def register_pbpk_tools(mcp: FastMCP):
                 For lipophilic bases (logP>3), "poulin_theil" typically gives
                 better Vss prediction; "rodgers_rowland" is the standard default.
 
+        ## Anti-fabrication
+
+        Do NOT call this tool with placeholder, "typical", or estimated
+        physicochemical or clearance values. If a measurement (RED for
+        fu_inc/fu_hep, Bp/p assay for R_bp, Caco-2 for Peff, hepatocyte
+        depletion for CLint) is unavailable for any required parameter,
+        ask the user explicitly first. The server enforces physiological
+        ranges and rejects out-of-range values. Sentinel defaults
+        (fu_p=1.0, R_bp=1.0, CL_int=0) trigger soft warnings. Library
+        compound lookup ignores any custom physicochemical values you
+        pass alongside `name` — it warns, but the data still travels.
+
         Returns:
             Markdown summary with PK parameters and key concentrations.
         """
@@ -388,15 +405,53 @@ def register_pbpk_tools(mcp: FastMCP):
         cl_int_resolved = CL_int
         ivive_info = ""
 
+        # Capture inputs for audit log (before validation transforms)
+        _audit_inputs = {
+            "name": name, "dose_mg": dose_mg, "route": route,
+            "duration_h": duration_h, "n_doses": n_doses,
+            "distribution_model": distribution_model,
+            "kp_method": kp_method,
+            "clearance_source": clearance_source,
+            "CL_int": CL_int, "CLint_vitro_hlm": CLint_vitro_hlm,
+            "CLint_vitro_hep": CLint_vitro_hep, "CLint_per_cyp": CLint_per_cyp,
+            "logP": logP, "pKa": pKa, "fu_p": fu_p, "R_bp": R_bp, "mw": mw,
+            "compound_type": compound_type, "body_weight": body_weight,
+            "sex": sex, "age": age,
+        }
+
         # Pre-IVIVE: hard validation of clearance_source vs provided inputs
-        # (raises with actionable message before any computation happens)
+        # AND the new clearance discriminated union (catches incomplete pairs).
         from core.validation import (
             validate_kp_method, validate_clearance_source_mismatch,
         )
+        from core.clearance_spec import parse_clearance_from_legacy_args
+        from core.transporter_spec import TransporterKwargs
+
         validate_kp_method(kp_method)
         validate_clearance_source_mismatch(
             clearance_source, CL_int, CLint_vitro_hlm,
             CLint_vitro_hep, CLint_per_cyp,
+        )
+        # Schema-level: clearance discriminated union (re-validates ranges,
+        # ensures the chosen source has its required input)
+        try:
+            _clearance_spec = parse_clearance_from_legacy_args(
+                clearance_source=clearance_source,
+                CL_int=CL_int, CLint_vitro_hlm=CLint_vitro_hlm,
+                CLint_vitro_hep=CLint_vitro_hep,
+                CLint_per_cyp=CLint_per_cyp,
+                protein_conc=protein_conc,
+            )
+        except Exception as e:
+            raise ValueError(f"Clearance schema validation failed: {e}") from e
+
+        # Schema-level: transporter pairing (Km xor Vmax → reject)
+        _transporter_spec = TransporterKwargs.from_legacy_kwargs(
+            liver_oatp_km=liver_oatp_km, liver_oatp_vmax=liver_oatp_vmax,
+            liver_mrp2_km=liver_mrp2_km, liver_mrp2_vmax=liver_mrp2_vmax,
+            kidney_oct2_km=kidney_oct2_km, kidney_oct2_vmax=kidney_oct2_vmax,
+            kidney_mate1_km=kidney_mate1_km, kidney_mate1_vmax=kidney_mate1_vmax,
+            gut_pgp_km=gut_pgp_km, gut_pgp_vmax=gut_pgp_vmax,
         )
 
         if clearance_source == "hlm" and CLint_vitro_hlm is not None:
@@ -424,33 +479,8 @@ def register_pbpk_tools(mcp: FastMCP):
             cl_int_resolved = ivive_r["CLint_in_vivo_L_per_h"]
             ivive_info = f"IVIVE (rCYP): {cyp_dict} → {cl_int_resolved:.1f} L/h"
 
-        # --- Build transporter dict ---
-        transporter_dict = {}
-        if liver_oatp_km is not None and liver_oatp_vmax is not None:
-            from core.transporters import OrganTransporters, TransporterSpec, TransportDirection
-            liver_influx = [TransporterSpec("OATP1B1", "liver",
-                TransportDirection.INFLUX_PLASMA_TO_INTERSTITIAL, liver_oatp_km, liver_oatp_vmax)]
-            liver_efflux = []
-            if liver_mrp2_km is not None and liver_mrp2_vmax is not None:
-                liver_efflux.append(TransporterSpec("MRP2", "liver",
-                    TransportDirection.EXCRETION_BILE, liver_mrp2_km, liver_mrp2_vmax))
-            transporter_dict["liver"] = OrganTransporters("liver", liver_influx, liver_efflux)
-
-        if kidney_oct2_km is not None and kidney_oct2_vmax is not None:
-            from core.transporters import OrganTransporters, TransporterSpec, TransportDirection
-            kid_influx = [TransporterSpec("OCT2", "kidney",
-                TransportDirection.INFLUX_INT_TO_CELL, kidney_oct2_km, kidney_oct2_vmax)]
-            kid_efflux = []
-            if kidney_mate1_km is not None and kidney_mate1_vmax is not None:
-                kid_efflux.append(TransporterSpec("MATE1", "kidney",
-                    TransportDirection.EXCRETION_KIDNEY, kidney_mate1_km, kidney_mate1_vmax))
-            transporter_dict["kidney"] = OrganTransporters("kidney", kid_influx, kid_efflux)
-
-        if gut_pgp_km is not None and gut_pgp_vmax is not None:
-            from core.transporters import OrganTransporters, TransporterSpec, TransportDirection
-            transporter_dict["gut"] = OrganTransporters("gut", [],
-                [TransporterSpec("P-gp", "gut",
-                    TransportDirection.EFFLUX_CELL_TO_LUMEN, gut_pgp_km, gut_pgp_vmax)])
+        # --- Build transporter dict (schema-validated above) ---
+        transporter_dict = _transporter_spec.to_organ_transporters()
 
         # --- Build compound ---
         if name.lower() in COMPOUND_LIBRARY:
@@ -520,6 +550,16 @@ def register_pbpk_tools(mcp: FastMCP):
             cl_int_resolved=cl_int_resolved,
             compound_type=compound.compound_type.value,
             user_overrides=user_overrides,
+            # Range-checked numeric params (None if user didn't supply)
+            mw=(mw if mw and mw != 300.0 else None),
+            logP=(logP if logP != 0.0 else None),
+            pKa=(pKa if pKa != 7.0 else None),
+            ka=(ka if ka != 1.0 else None),
+            Fa=Fa, Fg=Fg, Peff=Peff, Vmax=Vmax, Km=Km,
+            dose_mg=dose_mg, duration_h=duration_h,
+            n_doses=n_doses, interval_h=interval_h,
+            body_weight=body_weight, age=age,
+            route=route,
         )
 
         # --- Build model (with transporters if provided) ---
@@ -637,6 +677,66 @@ def register_pbpk_tools(mcp: FastMCP):
 
         if plot_path:
             output.append(f"\n**Plot saved:** `{plot_path}`")
+
+        # --- Structured "what I did / did not" footer ---
+        # Forces the tool to enumerate defaults used and skipped validations
+        # so a downstream LLM cannot silently elide the model's limits.
+        defaults_used = []
+        if not in_library_match:
+            if compound.fu_p == 1.0:
+                defaults_used.append("fu_p=1.0 (sentinel; provide measured value)")
+            if compound.R_bp == 1.0:
+                defaults_used.append("R_bp=1.0 (sentinel; provide measured or predicted value)")
+            if cl_int_resolved == 0 and CL_renal == 0:
+                defaults_used.append("CL_int=0, CL_renal=0 (no elimination)")
+            if not Peff:
+                defaults_used.append("Peff not provided — Fg may be unreliable")
+        skipped = []
+        if cl_int_resolved > 0 and clearance_source == "hlm" and not in_library_match:
+            skipped.append("UGT/SULT/esterase metabolism (HLM measures CYP only — switch to "
+                           "clearance_source='hepatocyte' if non-CYP pathways contribute)")
+        if not transporter_dict:
+            skipped.append("Active transport (OATP/MRP2/OCT2/MATE1/P-gp) — provide "
+                           "Km/Vmax pairs and set distribution_model='permeability_limited' to enable")
+
+        output.append("\n### Modelling Provenance")
+        output.append("> Tag every parameter as **M**=measured / **L**=literature / **P**=predicted "
+                      "/ **D**=default in your interpretation.")
+        if defaults_used:
+            output.append("\n**Defaults used (no user / library value):**")
+            for d in defaults_used:
+                output.append(f"- {d}")
+        if skipped:
+            output.append("\n**Mechanisms NOT modelled:**")
+            for s in skipped:
+                output.append(f"- {s}")
+        if not defaults_used and not skipped:
+            output.append("\n_No suspicious defaults; all critical params resolved._")
+
+        # --- Audit log ---
+        from core.audit import log_simulation
+        try:
+            fp = log_simulation(
+                tool_name="run_pbpk_simulation",
+                inputs=_audit_inputs,
+                resolved={
+                    "compound_name": compound.name,
+                    "in_library": in_library_match,
+                    "cl_int_resolved_L_per_h": cl_int_resolved,
+                    "kp_method_used": kp_method,
+                    "transporters_active": list(transporter_dict.keys()),
+                    "ehc": False,
+                },
+                warnings=soft_warnings,
+                summary={
+                    "Cmax": pk.Cmax, "Tmax": pk.Tmax,
+                    "AUC_0_inf": pk.AUC_0_inf, "t_half": pk.t_half,
+                    "CL_F": pk.CL_F, "Vss": pk.Vss,
+                },
+            )
+            output.append(f"\n_Audit fingerprint: `{fp}`_")
+        except Exception:
+            pass  # never let audit failure break a simulation
 
         return "\n".join(output)
 

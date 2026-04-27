@@ -229,19 +229,70 @@ def validate_run_pbpk_inputs(
     cl_int_resolved: float,
     compound_type: str,
     user_overrides: Optional[dict] = None,
+    # Range-checked fields (None to skip)
+    mw: Optional[float] = None,
+    logP: Optional[float] = None,
+    pKa: Optional[float] = None,
+    ka: Optional[float] = None,
+    Fa: Optional[float] = None,
+    Fg: Optional[float] = None,
+    Peff: Optional[float] = None,
+    Vmax: Optional[float] = None,
+    Km: Optional[float] = None,
+    dose_mg: Optional[float] = None,
+    duration_h: Optional[float] = None,
+    n_doses: Optional[int] = None,
+    interval_h: Optional[float] = None,
+    body_weight: Optional[float] = None,
+    age: Optional[float] = None,
+    route: Optional[str] = None,
 ) -> list[str]:
     """
     Run all checks. Raises on hard errors (invalid enum, mismatched
-    clearance source, zero elimination). Returns a list of soft-warning
-    strings to be surfaced in the tool's markdown output.
+    clearance source, out-of-range physical parameters). Returns a list
+    of soft-warning strings to be surfaced in the tool's markdown output.
     """
-    # Hard errors (already raised earlier in tool body for fail-fast UX,
-    # but called here too in case validate_run_pbpk_inputs is the entry point)
+    from .invariants import (
+        check_compound_ranges, check_dose_subject_ranges,
+        check_dose_self_consistency, raise_on_violations,
+    )
+
+    # Hard errors (raised at call site for fail-fast, here as defense in depth)
     validate_kp_method(kp_method)
     validate_clearance_source_mismatch(
         clearance_source, CL_int, CLint_vitro_hlm,
         CLint_vitro_hep, CLint_per_cyp,
     )
+
+    # Range invariants — only check values the user actually supplied
+    # (library lookups go through curated values that should already be in range).
+    in_library = bool(name and name.lower() in library)
+    range_violations: list = []
+    if not in_library:
+        range_violations.extend(check_compound_ranges(
+            mw=mw, logP=logP, pKa=pKa, fu_p=fu_p, R_bp=R_bp,
+            ka=ka, Fa=Fa, Fg=Fg, Peff=Peff,
+            CL_int=CL_int if CL_int > 0 else None,
+            CL_renal=CL_renal if CL_renal > 0 else None,
+            CLint_vitro_hlm=CLint_vitro_hlm,
+            CLint_vitro_hep=CLint_vitro_hep,
+            Vmax=Vmax, Km=Km,
+        ))
+    range_violations.extend(check_dose_subject_ranges(
+        dose_mg=dose_mg, duration_h=duration_h,
+        n_doses=n_doses, interval_h=interval_h,
+        body_weight=body_weight, age=age,
+    ))
+    if (dose_mg is not None and n_doses is not None
+            and interval_h is not None and duration_h is not None
+            and route is not None):
+        v = check_dose_self_consistency(
+            dose_mg=dose_mg, n_doses=n_doses, interval_h=interval_h,
+            duration_h=duration_h, route=route,
+        )
+        if v:
+            range_violations.append(v)
+    raise_on_violations(range_violations)
 
     # Soft warnings
     warnings: list[str] = []
@@ -250,7 +301,7 @@ def validate_run_pbpk_inputs(
     warnings.extend(validate_library_override(
         name, library, user_overrides or {}))
     warnings.extend(validate_suspicious_defaults(
-        in_library=(name and name.lower() in library),
+        in_library=in_library,
         fu_p=fu_p, R_bp=R_bp,
         cl_int_resolved=cl_int_resolved,
         CL_renal=CL_renal,
