@@ -1,5 +1,48 @@
 # PBPK MCP Server — Changelog
 
+## v2.2 (2026-04-22) — Third-pass: prediction-tool silent fallback
+
+A focused audit of the prediction tools (predict_kp,
+predict_hepatic_clearance, predict_fg, simulate_acat, etc.) revealed
+that several of them returned plausible-looking results when called
+with all-default arguments — sentinel values masquerading as
+predictions. All closed.
+
+### Eight more silent-fallbacks closed
+1. `predict_kp()` with no args returned a Kp table for "Custom
+   Compound" (logP=0, fu_p=1.0). New `require_compound_input()`
+   refuses unless either a library name or non-default physchem is
+   supplied.
+2. `compare_kp_methods()` — same fix.
+3. `predict_tissue_binding()` — same fix.
+4. `predict_blood_plasma_ratio()` returned R_bp=0.744 from defaults.
+   Same fix (with adapted sentinel set).
+5. `predict_hepatic_clearance()` returned CL_h=0 (the trivial
+   answer when CL_int=0) without flagging it. Now requires CL_int>0
+   or a library name with non-zero CL_int.
+6. `predict_fg()` returned Fg≈1.0 trivially when CLint_gut=0.
+   Now requires either a library name or CLint_gut>0.
+7. `simulate_acat()` returned a complete absorption profile for
+   sentinel-default drug parameters. Now refuses the all-default
+   invocation.
+8. `pregnancy_physiology(gestational_age_weeks=100)` silently
+   extrapolated multiplier curves into nonsense. Now range-checks
+   GA ∈ [0, 42].
+9. `allometric_scaling()` returned a "scaled human prediction"
+   from the sentinel defaults (CL=1.0, Vss=0.5, BW=0.25). Now
+   refuses the all-default invocation and requires CL_animal > 0.
+
+### New
+- `core/validation.py::require_compound_input()` — generic guard
+  for prediction tools. Allows library lookup OR explicit physchem;
+  refuses bare invocation that would return a sentinel-built result.
+
+### Verification
+- 73/73 fail-fast tests pass (was 57)
+- 16 new test cases covering all eight prediction-tool fixes
+- All happy paths preserved (library compound + custom-physchem
+  invocations still work)
+
 ## v2.1 (2026-04-22) — Second-pass silent-fallback audit
 
 A focused audit of the remaining tool surface revealed six silent-

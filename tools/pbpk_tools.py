@@ -162,6 +162,10 @@ def register_pbpk_tools(mcp: FastMCP):
         Returns:
             Markdown table of Kp values for all 13 tissues.
         """
+        from core.validation import require_compound_input
+        require_compound_input(name=name, library=COMPOUND_LIBRARY,
+                               logP=logP, pKa=pKa, fu_p=fu_p, mw=mw,
+                               tool_name="predict_kp")
         if name.lower() in COMPOUND_LIBRARY:
             compound = COMPOUND_LIBRARY[name.lower()]
         else:
@@ -224,6 +228,10 @@ def register_pbpk_tools(mcp: FastMCP):
         Returns:
             Side-by-side comparison table.
         """
+        from core.validation import require_compound_input
+        require_compound_input(name=name, library=COMPOUND_LIBRARY,
+                               logP=logP, pKa=pKa, fu_p=fu_p, mw=mw,
+                               tool_name="compare_kp_methods")
         if name.lower() in COMPOUND_LIBRARY:
             compound = COMPOUND_LIBRARY[name.lower()]
         else:
@@ -263,6 +271,10 @@ def register_pbpk_tools(mcp: FastMCP):
         Returns:
             Markdown table of all tissue binding parameters.
         """
+        from core.validation import require_compound_input
+        require_compound_input(name=name, library=COMPOUND_LIBRARY,
+                               logP=logP, pKa=pKa, fu_p=fu_p, mw=mw,
+                               tool_name="predict_tissue_binding")
         if name.lower() in COMPOUND_LIBRARY:
             compound = COMPOUND_LIBRARY[name.lower()]
         else:
@@ -795,6 +807,20 @@ def register_pbpk_tools(mcp: FastMCP):
             fu_p = c.fu_p
             R_bp = c.R_bp
 
+        # Refuse a CL=0 simulation — that's the silent fallback when
+        # the user calls predict_hepatic_clearance() with no args
+        # (CL_int=0, fu_p=1.0, R_bp=1.0 → CL_h=0). Returning a
+        # plausible-looking zero is misleading.
+        if CL_int <= 0:
+            raise ValueError(
+                f"predict_hepatic_clearance requires CL_int > 0 (was "
+                f"{CL_int}). Either pass `name=` of a library compound "
+                f"(midazolam, diazepam, warfarin, theophylline, "
+                f"caffeine, metformin) or provide CL_int explicitly. "
+                f"Calling with all defaults returns CL_h=0, which is "
+                f"not a meaningful prediction."
+            )
+
         phys = get_physiology(body_weight=body_weight, sex=Sex(sex))
         Q_h = phys.Q_liver_total  # L/h
         fu_b = fu_p / R_bp
@@ -1055,6 +1081,19 @@ def register_pbpk_tools(mcp: FastMCP):
         Returns:
             Fg prediction with intermediate parameters.
         """
+        # Refuse to silently return Fg ≈ 1.0 — that's what happens
+        # when a user calls predict_fg() with no args (CLint_gut=0
+        # default → Fg=1). The result looks meaningful but isn't.
+        in_lib = bool(name and name.lower() in COMPOUND_LIBRARY)
+        if not in_lib and CLint_gut <= 0:
+            raise ValueError(
+                "predict_fg requires either a library compound name "
+                "(e.g. name='midazolam') OR CLint_gut > 0 (gut wall "
+                "intrinsic clearance, L/h). With CLint_gut=0 the model "
+                "trivially returns Fg=1.0, which is not a real "
+                "prediction. Provide CLint_gut explicitly or use a "
+                "library compound."
+            )
         # Library override for known compounds. Derive CLint_gut from library
         # Fg by first computing Qgut from Peff, then inverting the Qgut formula:
         # Fg = Qgut/(Qgut + fu_gut*CLint_gut) ⟹ CLint_gut = Qgut*(1-Fg)/(fu_gut*Fg)
@@ -1139,6 +1178,18 @@ def register_pbpk_tools(mcp: FastMCP):
         Returns:
             R_bp prediction with Kp_RBC.
         """
+        from core.validation import require_compound_input
+        # Note: predict_blood_plasma_ratio uses different sentinel
+        # defaults (logP=2.0, fu_p=0.5) than predict_kp — but the
+        # require_compound_input check below uses our canonical
+        # sentinel set, so we adapt: only the canonical sentinels
+        # signal "no input given".
+        require_compound_input(
+            name=name, library=COMPOUND_LIBRARY,
+            logP=logP if logP != 2.0 else 0.0,   # un-shift to canonical sentinel
+            pKa=pKa, fu_p=fu_p if fu_p != 0.5 else 1.0, mw=mw,
+            tool_name="predict_blood_plasma_ratio",
+        )
         if name.lower() in COMPOUND_LIBRARY:
             compound = COMPOUND_LIBRARY[name.lower()]
         else:
@@ -1281,6 +1332,22 @@ def register_pbpk_tools(mcp: FastMCP):
         Returns:
             ACAT result with Fa, Fg, dissolution times, regional absorption.
         """
+        # Refuse all-default invocation — every other input becomes a
+        # sentinel and the result is plausible-looking nonsense.
+        in_lib_acat = bool(name and name.lower() in COMPOUND_LIBRARY)
+        if not in_lib_acat:
+            all_default = (mw == 300.0 and pKa == 7.0
+                           and compound_type == "neutral"
+                           and S0 == 1.0 and Peff == 5.0)
+            if all_default:
+                raise ValueError(
+                    "simulate_acat requires either a library compound "
+                    "name (e.g. name='midazolam') OR explicit drug "
+                    "parameters (mw, pKa, compound_type, S0, Peff). "
+                    "All-default arguments produce a plausible-looking "
+                    "ACAT prediction with no physical meaning."
+                )
+
         if name.lower() in COMPOUND_LIBRARY:
             c = COMPOUND_LIBRARY[name.lower()]
             mw = c.mw
@@ -1482,6 +1549,16 @@ def register_pbpk_tools(mcp: FastMCP):
         Returns:
             Table of pregnancy-related physiological changes.
         """
+        # Range check: GA must be physiologically possible (0-42 weeks).
+        # Previously, GA=100 would silently extrapolate the multiplier
+        # curves into nonsense.
+        if not (0.0 <= gestational_age_weeks <= 42.0):
+            raise ValueError(
+                f"gestational_age_weeks={gestational_age_weeks} out of "
+                f"range [0, 42]. Pregnancy lasts ~40 weeks (term); 42 "
+                f"is the latest viable post-term value. Negative or "
+                f">42 is non-physiological."
+            )
         return format_pregnancy_profile(gestational_age_weeks)
 
     # ----------------------------------------------------------------
@@ -1519,6 +1596,20 @@ def register_pbpk_tools(mcp: FastMCP):
             species: "rat", "mouse", "dog", or "monkey".
             BW_human: Target human BW (kg).
         """
+        # Refuse all-default scaling — sentinel CL=1.0 / Vss=0.5 with
+        # rat default produces a plausible-looking but meaningless
+        # human prediction.
+        if CL_animal == 1.0 and Vss_animal == 0.5 and BW_animal == 0.25:
+            raise ValueError(
+                "allometric_scaling requires non-default CL_animal, "
+                "Vss_animal, BW_animal — all three at their sentinel "
+                "defaults (1.0, 0.5, 0.25 kg) means no real preclinical "
+                "data was supplied. Provide observed animal PK."
+            )
+        if CL_animal <= 0:
+            raise ValueError(
+                f"CL_animal must be > 0 (got {CL_animal})."
+            )
         result = scale_preclinical_to_human(
             CL_animal, Vss_animal, BW_animal, Species(species), BW_human
         )

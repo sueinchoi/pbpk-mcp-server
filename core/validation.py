@@ -87,6 +87,48 @@ def parse_cyp_dict(s: str, *, parameter_name: str) -> dict[str, float]:
     return out
 
 
+def require_compound_input(
+    *,
+    name: str,
+    library: dict,
+    logP: float,
+    pKa: float,
+    fu_p: float,
+    mw: float,
+    tool_name: str = "tool",
+) -> None:
+    """
+    Refuse to run a Kp / binding / clearance prediction when neither
+    a library name NOR meaningful custom physchem inputs were supplied.
+    Previously, a bare call (e.g. predict_kp()) returned a plausible
+    Kp table built from sentinel defaults — that's the silent fallback
+    this guard exists to prevent.
+
+    Allowed:
+      - name in library (any combination of physchem)
+      - name not in library AND user actually supplied non-default
+        logP / pKa / fu_p / mw
+
+    The threshold for "supplied" is "any of the four is non-default".
+    Sentinel defaults: logP=0, pKa=7.0, fu_p=1.0, mw=300.0.
+    """
+    if name and name.lower() in library:
+        return
+    all_default = (
+        logP == 0.0 and pKa == 7.0 and fu_p == 1.0 and mw == 300.0
+    )
+    if all_default:
+        raise ValueError(
+            f"`{tool_name}` requires either a library compound name "
+            f"(e.g. name='midazolam') OR explicit physchem inputs "
+            f"(logP, pKa, fu_p, mw — at least one must be non-default). "
+            f"Calling with no arguments would return a Kp / binding / "
+            f"clearance table built from sentinel defaults "
+            f"(logP=0, fu_p=1.0, mw=300) — that result has no physical "
+            f"meaning. Provide a real compound or library name."
+        )
+
+
 def validate_subject_sentinel(
     body_weight: float, sex: str, age: float,
 ) -> Optional[str]:

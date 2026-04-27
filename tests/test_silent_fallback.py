@@ -691,6 +691,132 @@ def t():
     )
 
 # ============================================================
+# Section 10c: Third-pass — prediction-tool silent fallback
+# ============================================================
+print("\n## Third-pass — prediction-tool silent fallback")
+
+@test("predict_kp() with no args raises (was: returned default-Custom Kp)")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["predict_kp"].fn(),
+        ValueError, "library compound name",
+    )
+
+@test("predict_kp(name='midazolam') still works (library path)")
+def t():
+    tools = _server()
+    out = tools["predict_kp"].fn(name="midazolam")
+    assert "Midazolam" in out and "Kp" in out
+
+@test("predict_kp(logP=4.51, fu_p=0.005, ...) works (custom path)")
+def t():
+    tools = _server()
+    out = tools["predict_kp"].fn(
+        logP=4.51, pKa=4.0, fu_p=0.005,
+        compound_type="acid", R_bp=0.55, mw=296.15,
+    )
+    assert "Kp" in out
+
+@test("compare_kp_methods() with no args raises")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["compare_kp_methods"].fn(),
+        ValueError, "library",
+    )
+
+@test("predict_tissue_binding() with no args raises")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["predict_tissue_binding"].fn(),
+        ValueError, "library",
+    )
+
+@test("predict_blood_plasma_ratio() with no args raises")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["predict_blood_plasma_ratio"].fn(),
+        ValueError, "library",
+    )
+
+@test("predict_hepatic_clearance() with no args raises (CL=0)")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["predict_hepatic_clearance"].fn(),
+        ValueError, "CL_int",
+    )
+
+@test("predict_hepatic_clearance(name='midazolam') works")
+def t():
+    tools = _server()
+    out = tools["predict_hepatic_clearance"].fn(name="midazolam")
+    assert "Hepatic" in out or "Clearance" in out
+
+@test("predict_fg() with no args raises (Fg=1 trivial)")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["predict_fg"].fn(),
+        ValueError, "CLint_gut",
+    )
+
+@test("predict_fg(name='midazolam') works (library Fg derivation)")
+def t():
+    tools = _server()
+    out = tools["predict_fg"].fn(name="midazolam")
+    assert "Fg" in out
+
+@test("simulate_acat() with no args raises (all-sentinel)")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["simulate_acat"].fn(),
+        ValueError, "library",
+    )
+
+@test("pregnancy_physiology(GA=100) raises (impossible)")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["pregnancy_physiology"].fn(gestational_age_weeks=100),
+        ValueError, "range",
+    )
+
+@test("pregnancy_physiology(GA=-5) raises")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["pregnancy_physiology"].fn(gestational_age_weeks=-5),
+        ValueError, "range",
+    )
+
+@test("pregnancy_physiology(GA=32) works (3rd trimester)")
+def t():
+    tools = _server()
+    out = tools["pregnancy_physiology"].fn(gestational_age_weeks=32)
+    assert "GA 32" in out or "32 weeks" in out
+
+@test("allometric_scaling() with all defaults raises")
+def t():
+    tools = _server()
+    expect_raises(
+        lambda: tools["allometric_scaling"].fn(),
+        ValueError, "default",
+    )
+
+@test("allometric_scaling(CL=2.5, Vss=1.2, BW=0.3) works")
+def t():
+    tools = _server()
+    out = tools["allometric_scaling"].fn(
+        CL_animal=2.5, Vss_animal=1.2, BW_animal=0.3, species="rat",
+    )
+    assert "Allometric" in out
+
+# ============================================================
 # Section 11: Provenance audit (output-time layer)
 # ============================================================
 print("\n## Provenance audit")
