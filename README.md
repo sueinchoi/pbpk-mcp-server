@@ -31,7 +31,7 @@ Desktop, or any MCP-capable client.
 
 ### Install
 ```bash
-git clone https://github.com/<user>/pbpk-mcp-server.git
+git clone https://github.com/sueinchoi/pbpk-mcp-server.git
 cd pbpk-mcp-server
 python3 -m venv .venv && source .venv/bin/activate
 pip install mcp numpy scipy matplotlib
