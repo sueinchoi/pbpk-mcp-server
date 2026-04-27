@@ -359,6 +359,48 @@ def t():
     assert 50 < total_vol < 100, f"organ volumes total {total_vol} L for 70 kg"
 
 # ============================================================
+# Section 7b: Mass-balance assertion (post-simulation)
+# ============================================================
+print("\n## Mass-balance assertion (post-simulation dose recovery)")
+
+@test("IV bolus run satisfies dose recovery within 1%")
+def t():
+    tools = _server()
+    out = tools["run_pbpk_simulation"].fn(
+        name="midazolam", dose_mg=5.0, route="iv_bolus",
+        duration_h=12.0, kp_method="poulin_theil",
+    )
+    assert "PBPK Simulation" in out, "simulation should succeed"
+
+@test("dose recovery check fires when ODE state is corrupted")
+def t():
+    """Construct a deliberately broken concentration profile and verify
+    check_dose_recovery raises. This is a unit test of the invariant
+    itself, not of the integrated server path."""
+    from core.invariants import check_dose_recovery, raise_on_violations
+    from core.compound import COMPOUND_LIBRARY
+    from core.physiology import get_physiology, Organ
+    from core.pbpk_model import PBPKModel, DosingProtocol, SimulationConfig, Route
+    import numpy as np
+    compound = COMPOUND_LIBRARY["midazolam"]
+    model = PBPKModel(compound, get_physiology(body_weight=70.0))
+    result = model.simulate(
+        DosingProtocol(dose_mg=5.0, route=Route.IV_BOLUS),
+        SimulationConfig(duration_h=12.0),
+    )
+    # Mutate result.venous_plasma to fabricate "extra" mass
+    result.venous_plasma = result.venous_plasma * 5.0
+    for k in result.concentrations:
+        result.concentrations[k] = result.concentrations[k] * 5.0
+    viol = check_dose_recovery(
+        result=result, model=model, dose_mg=5.0,
+        n_doses=1, route="iv_bolus", tolerance=0.01,
+    )
+    assert viol is not None, "should have detected mass-creation"
+    expect_raises(lambda: raise_on_violations([viol]),
+                  ValueError, "mass balance")
+
+# ============================================================
 # Section 8: Unit-aware parsing (pint)
 # ============================================================
 print("\n## Unit-aware parsing")

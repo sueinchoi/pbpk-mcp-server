@@ -341,6 +341,17 @@ def register_session_and_citation_tools(mcp: FastMCP):
             absorption_model=d.structure["absorption_model"],
         )
         result = model.simulate(dosing, sim_cfg)
+
+        # Mass-balance assertion (Mass-balance invariant).
+        from core.invariants import check_dose_recovery, raise_on_violations
+        viol = check_dose_recovery(
+            result=result, model=model,
+            dose_mg=dose_mg, n_doses=n_doses, route=route,
+            tolerance=0.01,
+        )
+        if viol is not None:
+            raise_on_violations([viol])
+
         is_iv = route in ("iv_bolus", "iv_infusion")
         pk = calculate_pk_parameters(
             result.time, result.venous_plasma,

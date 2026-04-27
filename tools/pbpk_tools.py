@@ -613,6 +613,18 @@ def register_pbpk_tools(mcp: FastMCP):
         # Run simulation
         result = model.simulate(dosing, sim_config)
 
+        # Post-simulation mass-balance assertion (Mass-balance invariant).
+        # Failure aborts with explicit error rather than emitting a warning.
+        from core.invariants import check_dose_recovery as _check_dose_recovery
+        _dose_violation = _check_dose_recovery(
+            result=result, model=model,
+            dose_mg=dose_mg, n_doses=n_doses, route=route,
+            tolerance=0.01,
+        )
+        if _dose_violation is not None:
+            from core.invariants import raise_on_violations
+            raise_on_violations([_dose_violation])
+
         # Calculate PK parameters
         # For multi-dose, AUC(0-t) covers all administered doses; pass total dose
         # so CL/F = total_dose / total_AUC under linear PK (Vss still correct).

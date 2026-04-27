@@ -254,3 +254,141 @@ def raise_on_violations(violations: list[InvariantViolation]) -> None:
             f"  • {v.parameter}={v.value!r} expected {v.expected} — {v.why}"
         )
     raise ValueError("\n".join(msg_lines))
+
+
+# ---------------------------------------------------------------------
+# Post-simulation dose recovery (mass balance assertion)
+# ---------------------------------------------------------------------
+
+def check_dose_recovery(
+    *,
+    result,                 # SimulationResult — has time, concentrations, venous_plasma
+    model,                  # PBPKModel — has compound, phys, kp
+    dose_mg: float,
+    n_doses: int,
+    route: str,
+    tolerance: float = 0.01,
+    oral_tolerance: float = 0.05,
+) -> Optional[InvariantViolation]:
+    """
+    Assert mass balance in the simulation. Failure means the ODE lost
+    or created mass somewhere — a serious physical bug (wrong volume
+    scaling, missing compartment, integration tolerance too loose).
+
+    Computation:
+        body_burden(T) = Σ_organs V_organ × C_organ(T)
+                       + V_arterial × C_art(T) + V_venous × C_ven(T)
+        eliminated(T)  ≈ ∫₀ᵀ ( CL_int × fu_p × C_liver / Kp_liver
+                              + CL_renal × C_kidney / Kp_kidney ) dt
+        input(T)       = dose_mg × n_doses_completed_by_T
+                          (for oral, multiplied by Fa)
+
+    Assert |input - (body_burden + eliminated)| / input < tolerance.
+
+    For multi-dose simulations, the check is run at the simulation end.
+    A 1% tolerance corresponds to typical BDF integration tolerance
+    (atol=1e-10, rtol=1e-8) on dosed mg amounts.
+    """
+    import numpy as np
+
+    if dose_mg <= 0:
+        return None  # nothing to check
+
+    # --- Total input mass (mg) ---
+    is_iv = route in ("iv_bolus", "iv_infusion")
+    if is_iv:
+        total_input = dose_mg * n_doses
+        effective_tolerance = tolerance
+    else:
+        # Oral: drug enters systemic circulation = dose × Fa × Fg.
+        #   Fa is the fraction absorbed from lumen into enterocyte.
+        #   Fg is the fraction escaping gut-wall metabolism.
+        # The (1-Fg) fraction is metabolized in the gut wall before
+        # reaching portal vein and is lost from the systemic mass
+        # balance perspective.
+        Fa = getattr(model.compound, "Fa", 1.0)
+        Fg = getattr(model.compound, "Fg", 1.0)
+        total_input = dose_mg * n_doses * Fa * Fg
+        # Trapezoidal post-hoc integration of CL × C_liver does not
+        # exactly match BDF ODE integration — typical agreement
+        # 1-3% on oral. IV bolus integrates more cleanly.
+        effective_tolerance = oral_tolerance
+
+    # --- Body burden at simulation end ---
+    t = result.time
+    if t is None or len(t) < 2:
+        return None
+    final_idx = len(t) - 1
+    p = model.phys
+
+    body_burden = 0.0
+    for organ_name, C_t in result.concentrations.items():
+        if organ_name in ("arterial", "venous"):
+            continue
+        # organ_name is the .value of an Organ enum
+        from .physiology import Organ as _O
+        try:
+            organ_enum = _O(organ_name)
+        except ValueError:
+            continue
+        V = p.organ_volumes.get(organ_enum, 0.0)
+        body_burden += V * C_t[final_idx]
+
+    # Blood pools — concentrations are in mg/L too
+    if hasattr(result, "arterial_plasma") and result.arterial_plasma is not None:
+        body_burden += p.V_arterial * result.arterial_plasma[final_idx]
+    if result.venous_plasma is not None:
+        body_burden += p.V_venous * result.venous_plasma[final_idx]
+
+    # Drug remaining in oral lumen (oral only) — not "lost", just
+    # not yet absorbed
+    lumen_remaining = 0.0
+    if not is_iv and hasattr(result, "lumen_amount"):
+        lumen_amount = getattr(result, "lumen_amount", None)
+        if lumen_amount is not None:
+            lumen_remaining = lumen_amount[final_idx]
+
+    # --- Eliminated mass — integrate CL × C_u_liver and CL_r × C_u_kidney ---
+    fu_p = model.compound.fu_p
+    kp_liver = model.kp.get(_O.LIVER, 1.0) if hasattr(model, "kp") else 1.0
+    kp_kidney = model.kp.get(_O.KIDNEY, 1.0) if hasattr(model, "kp") else 1.0
+    R_bp = model.compound.R_bp
+
+    C_liver = result.concentrations.get("liver")
+    C_kidney = result.concentrations.get("kidney")
+
+    eliminated = 0.0
+    if C_liver is not None and model.compound.CL_int > 0:
+        # CL term in ODE is CL_int × fu_p × (C_liver / Kp_liver)
+        # Integrate by trapezoidal rule
+        rate_liver = model.compound.CL_int * fu_p * (C_liver / max(kp_liver, 1e-3))
+        eliminated += float(np.trapezoid(rate_liver, t))
+    if C_kidney is not None and model.compound.CL_renal > 0:
+        rate_kidney = model.compound.CL_renal * (C_kidney / R_bp / max(kp_kidney, 1e-3))
+        eliminated += float(np.trapezoid(rate_kidney, t))
+
+    accounted = body_burden + lumen_remaining + eliminated
+    if total_input <= 0:
+        return None
+    rel_err = abs(total_input - accounted) / total_input
+
+    if rel_err > effective_tolerance:
+        return InvariantViolation(
+            parameter="dose_recovery",
+            value=(
+                f"input={total_input:.4f} mg, "
+                f"body_burden={body_burden:.4f} mg, "
+                f"lumen_remaining={lumen_remaining:.4f} mg, "
+                f"eliminated={eliminated:.4f} mg, "
+                f"rel_err={rel_err:.4%}"
+            ),
+            expected=f"|input - accounted| / input < {effective_tolerance:.1%}",
+            why=(
+                "post-simulation mass balance failed — drug created or destroyed "
+                "in the ODE. Common causes: corrupt physiology table (run "
+                "get_physiology mass-balance check), distribution_model mismatch "
+                "between organ volumes and ODE state, integration tolerance too "
+                "loose (lower atol/rtol)"
+            ),
+        )
+    return None

@@ -114,8 +114,24 @@ even though CL was right.
 
 ## Server-side safety architecture
 
-The MCP server prefers schema/invariant enforcement over prompt
-instructions. Seven layers cooperate:
+The MCP server combines (a) five invariants declared in the system
+prompt — Refuse-to-default, Cite-or-abstain, Unit-explicit,
+Range-check, Mass-balance — with (b) seven runtime layers that
+enforce them. Prompt + runtime is stronger than either alone:
+
+### The five invariants (declared in `server.py::FastMCP(instructions=...)`)
+
+1. **Refuse-to-default** — never silently substitute a default for
+   a missing required parameter.
+2. **Cite-or-abstain** — every literature value carries a verifiable
+   PMID/DOI; cache miss + network error → mark `unverified`.
+3. **Unit-explicit** — pass canonical-unit floats or unit-bearing
+   strings; pint validators reject incompatible units.
+4. **Range-check** — out-of-range values are REJECTED, not clipped.
+5. **Mass-balance** — post-simulation dose recovery aborts on >1%
+   IV / >5% oral.
+
+### Runtime enforcement (the seven layers):
 
 1. **`core/clearance_spec.py`** — Pydantic discriminated union
    (`DirectClearance | HLMClearance | HepatocyteClearance |

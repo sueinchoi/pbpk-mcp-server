@@ -1,5 +1,50 @@
 # PBPK MCP Server — Changelog
 
+## v1.9 (2026-04-22) — Five invariants in MCP system prompt
+
+The FastMCP `instructions` field now declares five hard invariants
+that the server enforces. Together with the v1.7 + v1.8 schema /
+validator architecture, this binds LLM behavior at both the prompt
+and runtime layers.
+
+### Invariants declared in system prompt (`server.py`)
+1. **Refuse-to-default** — never silently substitute a default for
+   a missing required parameter; ask the user or return a structured
+   missing-parameter error.
+2. **Cite-or-abstain** — every literature value carries a verifiable
+   identifier (PMID, DOI, ChEMBL ID, etc.); use `verify_citation()`
+   before inserting into a Source field.
+3. **Unit-explicit** — pass canonical-unit floats or unit-bearing
+   strings ('70 uL/min/mg'); pint validators reject incompatible
+   units.
+4. **Range-check** — out-of-range values are REJECTED, not clipped.
+5. **Mass-balance** — every simulation runs a post-hoc dose-recovery
+   check. Failure ABORTS, never warns.
+
+### New
+- `core/invariants.py::check_dose_recovery` — post-simulation mass
+  balance assertion. Computes body burden (Σ V_organ × C_organ +
+  blood pools) + cumulative eliminated (∫ CL × C_unbound dt) +
+  lumen remaining; compares to total input (dose × Fa × Fg for oral,
+  dose × n_doses for IV). Tolerance 1% IV, 5% oral (post-hoc trap
+  integration vs BDF agreement).
+- `pbpk_modeling_guide` prompt now opens with the five invariants
+  as rules the LLM must respect in its reasoning.
+- `tests/test_silent_fallback.py` — 2 new mass-balance cases.
+
+### Behavior changes
+- `run_pbpk_simulation` and `simulate_validated` both call
+  `check_dose_recovery` after the ODE solve. A violation raises
+  `ValueError` with the numeric breakdown (input / body /
+  eliminated / rel_err) — the simulation does NOT return a result.
+
+### Verification
+- 40/40 fail-fast tests pass (was 38)
+- Library Midazolam IV/oral, Diclofenac hepatocyte-IVIVE all clear
+  the dose-recovery check
+- Deliberately corrupted result (×5 concentration) is detected and
+  aborted
+
 ## v1.8 (2026-04-22) — Units, citations, session-based workflow
 
 Completes the server-side safety architecture with the three remaining
