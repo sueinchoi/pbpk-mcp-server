@@ -1,5 +1,64 @@
 # PBPK MCP Server — Changelog
 
+## v2.7 (2026-04-28) — Restore verified PMIDs to library citations
+
+After v2.6 stripped 18 fabricated PMIDs from COMPOUND_LIBRARY, this
+release adds back the **correct** PMIDs — each individually verified
+against PubMed E-utils via verify_citation(mode='online').
+
+Verified citations (20 PMID references across 6 library compounds):
+
+Midazolam:
+- PMID:8646820 — Thummel et al. 1996, Clin Pharmacol Ther
+  ("Oral first-pass elimination of midazolam involves both
+   gastrointestinal and hepatic CYP3A-mediated metabolism")
+  → fu_p, CL_int, Fg
+- PMID:6138080 — Heizmann et al. 1983, Eur J Clin Pharmacol
+  ("Pharmacokinetics and bioavailability of midazolam in man")
+  → Fa  [N.B. previously cited as "Greenblatt 1984"; the canonical
+   bioavailability paper is Heizmann 1983, not Greenblatt]
+- PMID:8863283 — Björkman et al. 1996, J Pharm Sci
+  ("Determination of the steady state tissue distribution of
+   midazolam in the rat") → kp_scale
+- PMID:17724666 — Jansson et al. 2008, J Pharm Sci → recommended_kp_method
+- PMID:22309270 — Graham et al. 2012 → recommended_kp_method
+
+Metformin:
+- PMID:499320 — Pentikäinen et al. 1979, Eur J Clin Pharmacol
+  → fu_p, Fa, CL_renal
+
+Theophylline:
+- PMID:354635 — Ogilvie 1978, Clin Pharmacokinet → fu_p, CL_int
+
+Diazepam:
+- PMID:7357789 — Greenblatt et al. 1980, Clin Pharmacol Ther
+  ("Diazepam disposition determinants") → fu_p, CL_int
+- PMID:17724666 — Jansson et al. 2008 → recommended_kp_method
+
+Warfarin:
+- PMID:3542339 — Holford 1986, Clin Pharmacokinet → fu_p, CL_int
+- PMID:15124219 — Berezhkovskiy 2004, J Pharm Sci → recommended_kp_method
+
+Caffeine:
+- PMID:7083737 — Bonati et al. 1982, Clin Pharmacol Ther
+  ("Caffeine disposition after oral doses") → fu_p, CL_int
+  [N.B. previously cited as "Bonati 1985"; the original disposition
+   paper is from 1982]
+
+Also corrected misattributions discovered during verification:
+- Midazolam Fa: Heizmann 1983 (not Greenblatt 1984)
+- Caffeine: Bonati 1982 (not 1985)
+
+Allowlist updated:
+- tests/test_silent_fallback.py APPROVED_PMIDS now contains 11
+  unique verified PMIDs (some are referenced from multiple
+  compounds, hence 20 occurrences in citations).
+
+Verification:
+- 94/94 fail-fast tests pass
+- All 20 PMIDs in COMPOUND_LIBRARY pass robust verifier (surname
+  substring + year exact match against PubMed)
+
 ## v2.6 (2026-04-28) — Remove fabricated PMIDs from library citations
 
 A literature search session for diclofenac R_bp surfaced an

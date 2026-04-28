@@ -1076,9 +1076,27 @@ def t():
     # If you add a PMID, check it manually with verify_citation()
     # before committing — this test is a guard rail, not a
     # full audit (it can't verify online without network access).
-    # Document any approved PMIDs here:
+    # All PMIDs below were verified via verify_citation(mode='online')
+    # against PubMed E-utils on 2026-04-28.
     APPROVED_PMIDS = {
-        # (PMID, expected_author_substring) — verified offline
+        # Midazolam
+        "8646820",   # Thummel et al. 1996, Clin Pharmacol Ther
+        "6138080",   # Heizmann et al. 1983, Eur J Clin Pharmacol
+        "8863283",   # Björkman et al. 1996, J Pharm Sci (rat distribution)
+        # Metformin
+        "499320",    # Pentikäinen et al. 1979, Eur J Clin Pharmacol
+        # Theophylline
+        "354635",    # Ogilvie 1978, Clin Pharmacokinet
+        # Diazepam
+        "7357789",   # Greenblatt et al. 1980, Clin Pharmacol Ther
+        # Warfarin
+        "3542339",   # Holford 1986, Clin Pharmacokinet
+        # Caffeine
+        "7083737",   # Bonati et al. 1982, Clin Pharmacol Ther
+        # Kp methods (cross-compound references)
+        "17724666",  # Jansson et al. 2008, J Pharm Sci
+        "22309270",  # Graham et al. 2012, Drug Metab Pharmacokinet
+        "15124219",  # Berezhkovskiy 2004, J Pharm Sci
     }
     unapproved = [
         (n, k, p) for n, k, p, _ in pmids_found if p not in APPROVED_PMIDS
