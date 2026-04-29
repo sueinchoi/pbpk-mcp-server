@@ -159,11 +159,29 @@ enforce them. Prompt + runtime is stronger than either alone:
 7. **`core/audit.py`** — append-only JSONL at `data/audit.jsonl`
    with input fingerprint, resolved parameters, warnings, and NCA
    summary. `replay_lookup(fingerprint)` for reproducibility.
+8. **`core/web_param_search.py`** — anti-hallucination layer for
+   web-sourced parameters. Eight verification gates (required_fields,
+   citation_exists, topic_match, evidence_class, range_check,
+   unit_check, context_match, evidence_binding). Server fetches the
+   PubMed abstract or PMC OA full text and confirms the LLM's
+   verbatim snippet, value, and unit appear in the retrievable text.
+   Defends against (a) fabricated PMIDs, (b) real PMIDs for unrelated
+   topics, (c) "right paper, wrong number" — the comparator-drug-value
+   failure mode — and (d) citation laundering via
+   `upstream_citation_id` collapse. Five confidence states:
+   `high` (≥2 INDEPENDENT measurement groups within tolerance),
+   `medium` (1 candidate, snippet exact-verified), `low` (loose
+   binding), `conflict` (≥2 verified candidates that disagree —
+   refuse-to-merge), `none`. Auto-merge of disagreement (geomean of
+   0.5 and 50 → 5) is explicitly forbidden. Exposed via the
+   `search_parameter_with_citation` MCP tool and the
+   `web_search_grounding` MCP prompt that LLM drivers must read
+   before issuing a literature search query.
 
-When refactoring, preserve all seven layers. The fail-fast test
-suite (`tests/test_silent_fallback.py`, run via `python -m
-tests.test_silent_fallback`) covers 38 specific failure modes
-across these layers.
+When refactoring, preserve all eight layers. The fail-fast test
+suites (`tests/test_silent_fallback.py`, `tests/test_v28_patches.py`,
+`tests/test_web_param_search.py`, run via `python -m tests.<name>`)
+cover 148 specific failure modes across these layers.
 
 ### Provenance audit (output-time, separate layer)
 

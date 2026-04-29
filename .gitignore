@@ -13,6 +13,7 @@ __pycache__/
 *.png
 data/audit.jsonl
 data/citation_cache.jsonl
+data/web_param_audit.jsonl
 
 # Editor
 .vscode/
