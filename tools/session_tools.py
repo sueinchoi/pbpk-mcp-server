@@ -207,10 +207,48 @@ def register_session_and_citation_tools(mcp: FastMCP):
         """
         from core.session import validate_model as _val
         rep = _val(compound_id)
+
+        # Run the provenance audit alongside schema validation so we can
+        # show schema_ok and audit_ok as two distinct signals (codex UX
+        # review 2026-04-30 HIGH: previously, validate_model returned
+        # `ok: True` while the same response said "failed-audit", which
+        # is mixed authority).
+        audit_text = ""
+        audit_verdict = "unknown"
+        if rep.ok:
+            from prompts.provenance_audit import render_session_audit
+            audit_text = render_session_audit(compound_id)
+            for tag in ("failed-audit", "passed-with-flags", "passed"):
+                if tag in audit_text:
+                    audit_verdict = tag
+                    break
+
         lines = [f"## Validation Report — `{compound_id}`"]
-        lines.append(f"\n**ok**: {rep.ok}")
+        lines.append("")
+        lines.append("| Check | Result | Notes |")
+        lines.append("|---|---|---|")
+        lines.append(
+            f"| **schema_ok** | {'✓' if rep.ok else '✗'} | "
+            f"{'all required parameter groups present' if rep.ok else 'missing parameter groups (see below)'} |"
+        )
+        if rep.ok:
+            lines.append(
+                f"| **audit_ok** | "
+                f"{'✓' if audit_verdict == 'passed' else ('⚠️' if audit_verdict == 'passed-with-flags' else '✗')} | "
+                f"{audit_verdict} (provenance audit verdict — see table) |"
+            )
+            simulation_ready = audit_verdict in ("passed", "passed-with-flags")
+            lines.append(
+                f"| **simulation_ready** | {'✓' if simulation_ready else '✗'} | "
+                f"{'token issued — simulate_validated() will run' if simulation_ready else 'add citations / replace silent fallbacks before treating outputs as predictions'} |"
+            )
+        else:
+            lines.append("| **audit_ok** | — | not evaluated until schema_ok |")
+            lines.append("| **simulation_ready** | ✗ | resolve schema first |")
+        lines.append("")
+
         if rep.missing:
-            lines.append("\n**missing parameter groups:**")
+            lines.append("**missing parameter groups:**")
             for m in rep.missing:
                 lines.append(f"- {m}")
         if rep.warnings:
@@ -219,14 +257,20 @@ def register_session_and_citation_tools(mcp: FastMCP):
                 lines.append(f"- {w}")
         if rep.ok and rep.validation_token:
             lines.append(f"\n**validation_token**: `{rep.validation_token}`")
-            lines.append(f"\nProceed with: `simulate_validated('{rep.validation_token}', dose_mg=..., route='oral')`")
-            # Inline provenance audit at validation time — every successful
-            # validate_model surfaces the audit so the user sees the
-            # silent-fallback / unsourced / low-confidence breakdown
-            # before simulating, not after.
-            from prompts.provenance_audit import render_session_audit
+            lines.append(
+                f"\nProceed with: `simulate_validated('{rep.validation_token}', dose_mg=..., route=...)` "
+                f"(use route='iv_bolus' / 'iv_infusion' / 'oral' as appropriate)"
+            )
+            if audit_verdict == "failed-audit":
+                lines.append(
+                    "\n> ⚠️ Note: schema_ok=True but audit_ok=failed-audit. "
+                    "The token will let simulate_validated() RUN, but the "
+                    "output is NOT a prediction-grade result until the "
+                    "unsourced/silent-fallback parameters in the audit "
+                    "below are resolved."
+                )
             lines.append("\n---\n")
-            lines.append(render_session_audit(compound_id))
+            lines.append(audit_text)
         return "\n".join(lines)
 
     @mcp.tool()
@@ -429,10 +473,10 @@ def register_session_and_citation_tools(mcp: FastMCP):
     @mcp.tool()
     def audit_model_provenance(compound_id: str) -> str:
         """
-        Generate a deterministic provenance audit for a session-built
-        PBPK model. Output is a table with one row per parameter
-        (Parameter | Value | Unit | Source type | Source citation |
-        Confidence | Note), plus three explicit lists:
+        Generate a deterministic provenance audit for a PBPK model.
+        Output is a table with one row per parameter (Parameter | Value
+        | Unit | Source type | Source citation | Confidence | Note),
+        plus three explicit lists:
 
           (a) silent-fallback parameters (server defaults triggered)
           (b) low-confidence parameters that drive model output
@@ -446,11 +490,25 @@ def register_session_and_citation_tools(mcp: FastMCP):
         the opposite failure — outputs that look reasonable but were
         assembled from defaults the LLM didn't realize it was using.
 
-        For a compound built via the legacy run_pbpk_simulation flat
-        tool, no session exists — use the `provenance_audit` MCP
-        prompt instead and apply it manually.
+        Accepted forms of compound_id:
+          - A session compound_id (`cmpd_<hex>`) from register_compound.
+          - A library compound name (e.g. 'midazolam', 'metformin') —
+            the audit then runs against COMPOUND_LIBRARY values plus
+            their bundled `citations` metadata. This lets users audit
+            a legacy run_pbpk_simulation result without first creating
+            a session.
         """
         from prompts.provenance_audit import render_session_audit
+        # Library-compound shortcut: when the user passes a known library
+        # name, run the audit against the library entry's bundled
+        # citation metadata so the audit path is reachable from the
+        # legacy flat-API workflow too. Codex UX review 2026-04-30
+        # flagged the previous "Unknown compound_id='midazolam'" output
+        # as a BLOCKING workflow break.
+        from core.compound import COMPOUND_LIBRARY
+        key = (compound_id or "").lower().strip()
+        if key in COMPOUND_LIBRARY:
+            return _render_library_audit(COMPOUND_LIBRARY[key])
         return render_session_audit(compound_id)
 
     @mcp.tool()
@@ -537,3 +595,124 @@ def register_session_and_citation_tools(mcp: FastMCP):
                 n_ok += 1
         lines.append(f"\n**Verified: {n_ok}/{len(ids)}**")
         return "\n".join(lines)
+
+
+def _render_library_audit(compound) -> str:
+    """
+    Provenance audit for a library compound (no session). Renders the
+    same parameter-by-parameter table as render_session_audit, but
+    pulls Source/Citation values from the library entry's `citations`
+    dict (each library compound bundles its own provenance metadata).
+
+    Verdict logic mirrors the session audit:
+      - passed:           every scientific parameter has a citation,
+                          no sentinel defaults
+      - passed-with-flags: citations present but some are non-PMID
+                          (DrugBank/ChEMBL/calibrated-to)
+      - failed-audit:     scientific parameter without any citation,
+                          or sentinel-default value
+
+    Codex UX review 2026-04-30 (BLOCKING) — without this branch,
+    `audit_model_provenance('midazolam')` returned "Unknown
+    compound_id='midazolam'" and the audit path was unreachable from
+    the legacy run_pbpk_simulation flow.
+    """
+    citations = compound.citations or {}
+
+    rows = [
+        ("name", compound.name, "—"),
+        ("mw", compound.mw, "g/mol"),
+        ("logP", compound.logP, "log10"),
+        ("pKa", compound.pKa, "—"),
+        ("compound_type", compound.compound_type.value, "—"),
+        ("fu_p", compound.fu_p, "fraction"),
+        ("R_bp", compound.R_bp, "ratio"),
+        ("ka", compound.ka, "1/h"),
+        ("Fa", compound.Fa, "fraction"),
+        ("Fg", compound.Fg, "fraction"),
+        ("CL_int", compound.CL_int, "L/h"),
+        ("CL_renal", compound.CL_renal, "L/h"),
+    ]
+    if getattr(compound, "Peff", None) is not None:
+        rows.append(("Peff", compound.Peff, "1e-4 cm/s"))
+    if getattr(compound, "S0", None) is not None:
+        rows.append(("S0", compound.S0, "mg/mL"))
+
+    lines = [
+        f"## Provenance Audit — `{compound.name}` (library compound)",
+        "",
+        "| Parameter | Value | Unit | Source citation | Confidence | Note |",
+        "|---|---|---|---|---|---|",
+    ]
+    unsourced: list[str] = []
+    soft_flags: list[str] = []
+    for name, value, unit in rows:
+        cite = citations.get(name, "")
+        if not cite:
+            unsourced.append(name)
+            mark = "⚠️ "
+            confidence = "unverified"
+        elif cite.startswith("PMID:") or cite.startswith("DOI:"):
+            mark = ""
+            confidence = "high"
+        else:
+            mark = ""
+            confidence = "medium"
+            soft_flags.append(f"{name}: '{cite}' is not a PMID/DOI")
+        note = ""
+        if name in ("CL_int",) and "calibrated" in cite.lower():
+            note = "fitted to clinical CL — not a direct measurement"
+        lines.append(
+            f"| {mark}{name} | {value} | {unit} | "
+            f"{cite or '(none)'} | {confidence} | {note} |"
+        )
+
+    if compound.recommended_kp_method:
+        lines.append(
+            f"| recommended_kp_method | {compound.recommended_kp_method} | — | "
+            f"{citations.get('recommended_kp_method', '(none)')} | "
+            f"{'high' if 'PMID' in citations.get('recommended_kp_method', '') else 'medium'} | "
+            f"library default Kp method |"
+        )
+
+    lines.append("")
+    lines.append("### (a) Silent-fallback parameters")
+    lines.append("- _none — library compounds carry curated values_")
+
+    lines.append("")
+    lines.append("### (b) Citations that are not PMID/DOI")
+    if soft_flags:
+        for s in soft_flags:
+            lines.append(f"- {s}")
+    else:
+        lines.append("- _none — every cited source is a PMID or DOI_")
+
+    lines.append("")
+    lines.append("### (c) Unsourced parameters")
+    if unsourced:
+        for p in unsourced:
+            lines.append(f"- `{p}` — UNSOURCED (no entry in compound.citations)")
+    else:
+        lines.append("- _none — every parameter has a citation_")
+
+    lines.append("")
+    if unsourced:
+        verdict = "failed-audit"
+        note = (
+            f"{len(unsourced)} parameter(s) lack citations. Add them to the "
+            f"library entry's `citations` dict in core/compound.py."
+        )
+    elif soft_flags:
+        verdict = "passed-with-flags"
+        note = (
+            f"{len(soft_flags)} citation(s) are non-PMID/DOI. "
+            f"Database IDs (ChEMBL, DrugBank) are acceptable but PMID is "
+            f"preferred for measured values."
+        )
+    else:
+        verdict = "passed"
+        note = "every scientific parameter has a verifiable PMID/DOI."
+
+    lines.append("### Audit status")
+    lines.append(f"**`{verdict}`** — {note}")
+    return "\n".join(lines)
