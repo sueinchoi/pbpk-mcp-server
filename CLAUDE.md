@@ -181,7 +181,57 @@ enforce them. Prompt + runtime is stronger than either alone:
 When refactoring, preserve all eight layers. The fail-fast test
 suites (`tests/test_silent_fallback.py`, `tests/test_v28_patches.py`,
 `tests/test_web_param_search.py`, run via `python -m tests.<name>`)
-cover 148 specific failure modes across these layers.
+cover 153 specific failure modes across these layers.
+
+### Workflow signals (codex UX review 2026-04-30)
+
+`validate_model` returns three independent signals — do not collapse them:
+
+- **schema_ok** — all required parameter groups (compound,
+  binding, clearance, absorption, structure) are present and pass
+  range/discriminated-union validation. This issues the
+  `validation_token` so `simulate_validated()` can run.
+- **audit_ok** — the provenance audit verdict is `passed` or
+  `passed-with-flags`, not `failed-audit`. Failure here means
+  citations are missing or silent fallbacks fired.
+- **simulation_ready** — both above are true. Token is issued whenever
+  schema_ok is true (so the user can iterate on a draft), but
+  simulation_ready=false explicitly tells the user that running the
+  simulation will produce numbers that are NOT prediction-grade.
+
+`simulate_validated()` will run as long as schema_ok=true, even if
+audit_ok=failed-audit, because we want users to inspect intermediate
+results during iteration. The audit verdict is preserved in the
+output so the user knows the result is not yet citable.
+
+### Mass-balance tolerance note
+
+`simulate_validated()` and the legacy `run_pbpk_simulation()` both
+gate on `check_dose_recovery(tolerance=0.01, oral_tolerance=0.05)`.
+The 1% IV tolerance assumes BDF integration error compounded with
+trapezoidal post-hoc elimination integration. Configurations with
+non-trivial CL_renal added on top of CL_int can drift toward the
+edge of this tolerance — if a session-built compound fails mass
+balance with `rel_err` between 1% and 2%, this is calibration, not a
+physical bug. Possible mitigations: tighten the ODE solver atol/rtol
+upstream, or accept up to 2% IV drift. The current 1% gate
+intentionally fails closed.
+
+### DDI mechanism scope
+
+`predict_ddi(mechanism="reversible")` returns a screening-grade
+estimate that EXCLUDES time-dependent/mechanism-based inhibition
+(MBI) and induction. Known MBI inhibitors (ketoconazole, ritonavir,
+clarithromycin, fluvoxamine, verapamil, itraconazole) typically show
+3-5x more inhibition under MBI than under reversible-only Ki. The
+tool now emits a Mechanism-scope notice on every reversible/induction/
+mbi-only call pointing the user at `mechanism="net"` (combined
+inhibition + MBI + induction) or `run_dynamic_ddi` (time-resolved).
+
+For ketoconazole + midazolam, expect:
+- Static `mechanism="reversible"` → ~3-4x AUC ratio (lower bound)
+- Static `mechanism="net"` → ~8-12x AUC ratio (depends on KI/kinact)
+- Dynamic `run_dynamic_ddi` → 14-15x AUC ratio (matches lit 10-15x)
 
 ### Provenance audit (output-time, separate layer)
 
