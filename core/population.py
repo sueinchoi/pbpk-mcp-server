@@ -131,10 +131,12 @@ def _sample_parameter(mean: float, cv: float, dist: str, n: int,
 class PopulationResult:
     """Results of population PBPK simulation."""
     n_individuals: int
-    pk_params: list[PKParameters]           # per-individual PK
-    plasma_profiles: list[np.ndarray]       # per-individual C(t)
+    pk_params: list[PKParameters]           # per-individual PK (successful only)
+    plasma_profiles: list[np.ndarray]       # per-individual C(t) (successful only)
     time: np.ndarray                        # shared time vector
     demographics: dict                      # sampled demographics
+    n_failed: int = 0                       # individuals that failed integration
+    failure_reasons: list[str] = field(default_factory=list)
 
     # Summary statistics
     Cmax_median: float = 0.0
@@ -165,14 +167,38 @@ class PopulationResult:
         lines = [f"## Population PK Summary"]
         if compound_name:
             lines[0] += f" — {compound_name}"
+        n_success = self.n_individuals - self.n_failed
+        lines.append(
+            f"\nN = {n_success} of {self.n_individuals} virtual individuals "
+            f"completed integration"
+            + (f" ({self.n_failed} failed and were excluded from percentiles)"
+               if self.n_failed else "")
+            + "\n"
+        )
         lines.extend([
-            f"\nN = {self.n_individuals} virtual individuals\n",
             "| Parameter | Median | 5th %ile | 95th %ile |",
             "|-----------|--------|---------|----------|",
             f"| Cmax (mg/L) | {self.Cmax_median:.4g} | {self.Cmax_5th:.4g} | {self.Cmax_95th:.4g} |",
             f"| AUC (mg·h/L) | {self.AUC_median:.4g} | {self.AUC_5th:.4g} | {self.AUC_95th:.4g} |",
             f"| t½ (h) | {self.thalf_median:.2f} | — | — |",
         ])
+        if self.n_failed:
+            failure_rate = 100.0 * self.n_failed / self.n_individuals
+            lines.append(
+                f"\n> ⚠️ **{self.n_failed} of {self.n_individuals} individuals "
+                f"({failure_rate:.1f}%) failed integration** and are excluded "
+                f"from the percentiles above. If this rate is high, the "
+                f"compound parameters likely violate physiological ranges for "
+                f"part of the sampled population (e.g. CL_int too low for low "
+                f"body weight). Inspect failure reasons via "
+                f"`pop_result.failure_reasons`."
+            )
+            if failure_rate > 25.0:
+                lines.append(
+                    f">\n> Failure rate >25% — population percentiles are "
+                    f"unreliable. Re-run with explicit physiology bounds or "
+                    f"reduce inter-individual CV."
+                )
         return "\n".join(lines)
 
 
@@ -234,6 +260,7 @@ def run_population_simulation(
     pk_list = []
     profiles = []
     time_ref = None
+    failure_reasons: list[str] = []
 
     for i in range(n):
         # Build individual physiology with age + GFR
@@ -294,19 +321,28 @@ def run_population_simulation(
 
             if time_ref is None:
                 time_ref = result.time
-        except Exception:
-            # Skip failed individuals
-            pk_list.append(PKParameters(
-                Cmax=0, Tmax=0, AUC_0_t=0, AUC_0_inf=0,
-                t_half=0, lambda_z=0, CL_F=0, Vz_F=0,
-                Vss=None, MRT=0, C_last=0, T_last=0,
-            ))
-            if time_ref is not None:
-                profiles.append(np.zeros_like(time_ref))
+        except Exception as exc:
+            # Drop failed individuals from percentile statistics. Inserting
+            # a zero-PK record would silently bias medians/percentiles
+            # downward and report low-exposure subjects that never existed.
+            failure_reasons.append(
+                f"individual {i} (BW={float(weights[i]):.1f}kg, "
+                f"age={ind_age:.0f}, "
+                f"CL_int_factor={float(cl_int_factors[i]):.2f}): "
+                f"{type(exc).__name__}: {exc}"
+            )
 
     if time_ref is None:
         time_ref = np.linspace(0, config.duration_h, config.n_timepoints)
 
+    n_failed = len(failure_reasons)
+    if n_failed == n:
+        raise RuntimeError(
+            f"All {n} virtual individuals failed PBPK integration. "
+            f"Likely cause: compound parameters incompatible with the sampled "
+            f"physiology range. First failures:\n  - "
+            + "\n  - ".join(failure_reasons[:3])
+        )
     pop_result = PopulationResult(
         n_individuals=n,
         pk_params=pk_list,
@@ -319,6 +355,8 @@ def run_population_simulation(
             "cl_int_factors": cl_int_factors.tolist(),
             "fu_factors": fu_factors.tolist(),
         },
+        n_failed=n_failed,
+        failure_reasons=failure_reasons,
     )
     pop_result.compute_statistics()
     return pop_result
