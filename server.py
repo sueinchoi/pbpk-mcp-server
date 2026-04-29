@@ -16,9 +16,9 @@ from prompts.user_guide import format_user_guide, count_all_parameters
 mcp = FastMCP(
     "pbpk",
     instructions=(
-        "Whole-body PBPK modeling server. 41 tools, 7 Kp methods, ACAT, "
+        "Whole-body PBPK modeling server. 47 tools, 7 Kp methods, ACAT, "
         "IVIVE, DDI, population, transporters, PKSimDB, session workflow, "
-        "and citation verification.\n\n"
+        "citation verification, and anti-hallucination web parameter search.\n\n"
         "INVARIANTS (server-enforced — your output must respect these):\n\n"
         "1. REFUSE-TO-DEFAULT: Never substitute a default value silently for "
         "a required parameter. If the user has not supplied a value, ask "
@@ -71,7 +71,7 @@ def get_status() -> str:
     counts = count_all_parameters()
     return f"""# PBPK MCP Server v1.8
 
-## Tools: 42 (30 PBPK + 10 session/audit + 2 citation) | Parameters: {counts['total']} configurable
+## Tools: 47 (35 PBPK + 10 session/audit + 2 citation) | Parameters: {counts['total']} configurable
 - Tier 1 (Required): {counts['tier1_required']} params
 - Tier 2 (Recommended): {counts['tier2_recommended']} params
 - Tier 3 (Optional): {counts['tier3_optional']} params
