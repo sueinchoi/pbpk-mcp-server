@@ -394,28 +394,52 @@ def _gate_unit(c: WebParamCandidate, q: WebParamQuery) -> GateResult:
 
 
 def _gate_context_match(c: WebParamCandidate, q: WebParamQuery) -> GateResult:
-    """Species/matrix mismatch is the dominant 'comparator drug value
-    in the same paper' failure mode."""
+    """
+    Species/matrix mismatch is the dominant 'comparator drug value
+    in the same paper' failure mode. When the query specifies species
+    or matrix, the candidate MUST declare a matching value — declaring
+    nothing is rejected (codex review 2026-04-29).
+    """
     issues = []
-    if q.species and c.context.species and c.context.species.lower() != q.species.lower():
+    if q.species:
+        if not c.context.species:
+            issues.append(
+                f"query.species='{q.species}' but candidate did not declare "
+                f"context.species — silent omission would let a rat value "
+                f"be submitted as human"
+            )
+        elif c.context.species.lower() != q.species.lower():
+            issues.append(
+                f"species mismatch: requested '{q.species}', "
+                f"candidate '{c.context.species}'"
+            )
+    if q.matrix:
+        if not c.context.matrix:
+            issues.append(
+                f"query.matrix='{q.matrix}' but candidate did not declare "
+                f"context.matrix — silent omission would let an HLM value "
+                f"be submitted as hepatocyte"
+            )
+        elif c.context.matrix.lower() != q.matrix.lower():
+            issues.append(
+                f"matrix mismatch: requested '{q.matrix}', "
+                f"candidate '{c.context.matrix}'"
+            )
+    # Even when query did not specify species/matrix, candidate must declare
+    # at minimum the species — measurement context without species is
+    # ambiguous on its face.
+    if not q.species and not c.context.species:
         issues.append(
-            f"species mismatch: requested '{q.species}', candidate '{c.context.species}'"
-        )
-    if q.matrix and c.context.matrix and c.context.matrix.lower() != q.matrix.lower():
-        issues.append(
-            f"matrix mismatch: requested '{q.matrix}', candidate '{c.context.matrix}'"
+            "candidate did not declare species — submit context.species "
+            "to claim this value (no value is biologically meaningful "
+            "without species)"
         )
     if issues:
         return GateResult(gate="context_match", passed=False, reason="; ".join(issues))
-    if not c.context.species:
-        return GateResult(
-            gate="context_match", passed=False,
-            reason="candidate did not declare species — "
-                   "submit context.species to claim this value",
-        )
     return GateResult(
         gate="context_match", passed=True,
-        reason=f"species={c.context.species}, matrix={c.context.matrix or 'unspecified'}",
+        reason=f"species={c.context.species}, "
+               f"matrix={c.context.matrix or 'unspecified'}",
     )
 
 
@@ -424,18 +448,85 @@ def _strip_xml(text: str) -> str:
     return re.sub(r"<[^>]+>", " ", text or "")
 
 
+# Local window (in normalized characters) around the located snippet within
+# which we require value, unit, drug term, and parameter term to co-occur.
+# Set by codex review 2026-04-29: 'somewhere in abstract' is too loose;
+# comparator-drug snippets in the same paper would pass that gate.
+_BINDING_WINDOW_CHARS = 600
+
+
+def _bind_in_window(
+    text_norm: str, snippet_norm: str, c: WebParamCandidate, q: WebParamQuery,
+) -> tuple[bool, str]:
+    """
+    Given normalized source text containing the snippet, check whether
+    drug term, parameter term, value, unit, AND species/matrix all
+    co-occur within a local window around the snippet.
+
+    Returns (all_present, missing_terms_message).
+    """
+    pos = text_norm.find(snippet_norm)
+    if pos < 0:
+        return False, "snippet not located"
+    window_start = max(0, pos - _BINDING_WINDOW_CHARS // 2)
+    window_end = min(len(text_norm), pos + len(snippet_norm) + _BINDING_WINDOW_CHARS // 2)
+    window = text_norm[window_start:window_end]
+
+    value_str = _normalize_text(str(c.value))
+    unit_str = _normalize_text(c.unit)
+    drug_terms = [_normalize_text(q.drug_name)] + [_normalize_text(s) for s in q.drug_synonyms]
+    drug_terms = [t for t in drug_terms if t]
+    param_terms = [_normalize_text(q.parameter)] + [_normalize_text(s) for s in q.parameter_synonyms]
+    param_terms = [t for t in param_terms if t]
+
+    missing = []
+    if value_str and value_str not in window:
+        missing.append(f"value={value_str}")
+    if unit_str and unit_str not in window:
+        missing.append(f"unit={unit_str}")
+    if drug_terms and not any(t in window for t in drug_terms):
+        missing.append(f"drug∈{drug_terms}")
+    if param_terms and not any(t in window for t in param_terms):
+        missing.append(f"param∈{param_terms}")
+
+    # Species and matrix bind: at least the species must appear in the
+    # window (matrix is bound separately via context_match gate, but
+    # we add it here as a soft signal).
+    if q.species:
+        spec_norm = _normalize_text(q.species)
+        if spec_norm and spec_norm not in window:
+            missing.append(f"species={spec_norm}")
+
+    if missing:
+        return False, f"window-bind missing: {missing}"
+    return True, "all terms co-occur in window"
+
+
 def _evidence_binding_status(
-    c: WebParamCandidate,
+    c: WebParamCandidate, q: WebParamQuery,
 ) -> tuple[EvidenceBindingStatus, str]:
     """
-    Verify the snippet, value, and unit appear in retrievable source text.
+    Verify the snippet, value, unit, drug, parameter, and species/matrix
+    co-occur in a LOCAL WINDOW of retrievable source text — not just
+    exist somewhere in the document.
+
+    Window-scoped binding (codex review 2026-04-29) defends against:
+      - comparator-drug snippet in the same paper (drug term won't be
+        in the window around the snippet)
+      - pre-converted units (the LLM-declared unit won't appear near
+        the snippet because the source uses the original unit)
+      - value extracted from a different table row than the snippet
+        (value won't be in the window around the snippet)
 
     Order of attempts:
       1. PubMed abstract (E-utils efetch).
-      2. PMC full text (only for OA records).
-      3. If neither yields the snippet, return PAYWALLED_UNVERIFIED.
+      2. PMC OA full text.
+      3. PAYWALLED_UNVERIFIED if neither retrievable.
 
-    Returns (status, evidence_text_excerpt).
+    Returns (status, evidence_text_excerpt). VERIFIED_EXACT_SNIPPET
+    requires window co-occurrence of all terms. VERIFIED_NUMERIC_NEAR_CONTEXT
+    means snippet is found but window binding incomplete — this state
+    is NOT acceptable for auto-merged HIGH confidence (see synthesize).
     """
     if c.citation_type != "pmid":
         # DOI-only candidates currently cannot be snippet-verified through
@@ -451,12 +542,11 @@ def _evidence_binding_status(
     if abstract:
         abs_norm = _normalize_text(abstract)
         if snippet_norm in abs_norm:
-            value_str = _normalize_text(str(c.value))
-            unit_str = _normalize_text(c.unit)
-            both = (value_str in abs_norm) and (unit_str in abs_norm)
-            if both:
+            ok, why = _bind_in_window(abs_norm, snippet_norm, c, q)
+            if ok:
                 return EvidenceBindingStatus.VERIFIED_EXACT_SNIPPET, abstract[:400]
-            return EvidenceBindingStatus.VERIFIED_NUMERIC_NEAR_CONTEXT, abstract[:400]
+            return (EvidenceBindingStatus.VERIFIED_NUMERIC_NEAR_CONTEXT,
+                    f"snippet found but window binding loose: {why}")
 
     pmcid = fetch_pmcid_for_pmid(pmid)
     if pmcid:
@@ -464,12 +554,11 @@ def _evidence_binding_status(
         if full:
             full_norm = _normalize_text(_strip_xml(full))
             if snippet_norm in full_norm:
-                value_str = _normalize_text(str(c.value))
-                unit_str = _normalize_text(c.unit)
-                both = (value_str in full_norm) and (unit_str in full_norm)
-                if both:
+                ok, why = _bind_in_window(full_norm, snippet_norm, c, q)
+                if ok:
                     return EvidenceBindingStatus.VERIFIED_EXACT_SNIPPET, full[:400]
-                return EvidenceBindingStatus.VERIFIED_NUMERIC_NEAR_CONTEXT, full[:400]
+                return (EvidenceBindingStatus.VERIFIED_NUMERIC_NEAR_CONTEXT,
+                        f"snippet found but window binding loose: {why}")
 
     if abstract is None and not pmcid:
         return EvidenceBindingStatus.PAYWALLED_UNVERIFIED, "no abstract or PMC OA full text"
@@ -501,15 +590,18 @@ def verify_candidate(
 
     # Evidence binding is the heaviest gate (HTTP fetch). Run last so
     # quick rejections short-circuit the network.
-    binding, excerpt = _evidence_binding_status(candidate)
-    binding_passed = binding in (
-        EvidenceBindingStatus.VERIFIED_EXACT_SNIPPET,
-        EvidenceBindingStatus.VERIFIED_NUMERIC_NEAR_CONTEXT,
-    )
+    binding, excerpt = _evidence_binding_status(candidate, query)
+    # Only EXACT_SNIPPET (window-bound: drug+parameter+value+unit+species
+    # all co-occur in a local window around the snippet) is a hard pass.
+    # NUMERIC_NEAR_CONTEXT now means "snippet exists but window binding
+    # is incomplete" — that is a soft pass: candidate is preserved for
+    # user review and counts toward LOW confidence, never HIGH/MEDIUM
+    # auto-acceptance. Codex review 2026-04-29.
+    binding_strict_pass = (binding == EvidenceBindingStatus.VERIFIED_EXACT_SNIPPET)
     gates.append(GateResult(
-        gate="evidence_binding", passed=binding_passed,
-        reason=f"status={binding.value}",
-        severity="hard" if not binding_passed else "soft",
+        gate="evidence_binding", passed=binding_strict_pass,
+        reason=f"status={binding.value}; {excerpt[:120]}",
+        severity="hard" if not binding_strict_pass else "soft",
     ))
 
     return gates, binding, excerpt
@@ -523,45 +615,81 @@ def _classify_independence(
     candidates: list[tuple[int, WebParamCandidate]],
 ) -> list[list[int]]:
     """
-    Group candidate indices by upstream measurement. Two candidates that
-    share `upstream_citation_id` (or one cites the other's `citation_id`
-    as upstream) collapse to a single evidence group.
+    Group candidate indices by upstream measurement using union-find.
+
+    Two candidates share an evidence group if either:
+      - they have the same `upstream_citation_id`, OR
+      - one's `citation_id` equals the other's `upstream_citation_id`, OR
+      - they share the same `citation_id` (duplicate submission).
+
+    Union-find makes this transitive: if C1↔C2 and C2↔C3 are linked, the
+    final groups merge all three. Codex review 2026-04-29 caught a
+    bridging case (C1.upstream=X, C2.upstream=Y, C3.upstream=X with
+    C3.cite=C2.cite) that the previous ad-hoc loop split into two
+    groups, inflating confidence.
 
     A "high confidence" call requires ≥2 INDEPENDENT GROUPS, not ≥2
     candidates.
     """
-    groups: list[list[int]] = []
-    placed: dict[int, int] = {}  # candidate_index -> group_index
+    if not candidates:
+        return []
 
-    def upstream_key(c: WebParamCandidate) -> str:
-        # The original measurement chain anchor: explicit upstream if given,
-        # otherwise the candidate's own citation_id (which IS the original
-        # measurement when is_direct_measurement is True).
-        return (c.upstream_citation_id or c.citation_id).strip()
+    n = len(candidates)
+    indices = [idx for idx, _ in candidates]
+    cands = [c for _, c in candidates]
+    pos = {idx: i for i, idx in enumerate(indices)}
 
-    for idx, c in candidates:
-        key = upstream_key(c)
-        # Look for an existing group whose anchor is this key OR whose
-        # member anchors include this candidate's citation_id.
-        merged = False
-        for g_idx, group in enumerate(groups):
-            anchors = {
-                upstream_key(cand) for j, cand in candidates if j in group
-            }
-            citation_ids = {
-                cand.citation_id.strip()
-                for j, cand in candidates if j in group
-            }
-            if key in anchors or c.citation_id.strip() in anchors or key in citation_ids:
-                group.append(idx)
-                placed[idx] = g_idx
-                merged = True
-                break
-        if not merged:
-            groups.append([idx])
-            placed[idx] = len(groups) - 1
+    parent = list(range(n))
 
-    return groups
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    # Build keys for each candidate. Each candidate offers up to two
+    # identifiers that could link it to another: its own citation_id
+    # and its upstream_citation_id (if set).
+    own_id = [c.citation_id.strip() for c in cands]
+    upstream = [(c.upstream_citation_id or "").strip() for c in cands]
+
+    # Index by every identifier that anchors a measurement chain.
+    anchors: dict[str, list[int]] = {}
+    for i, c in enumerate(cands):
+        for key in {own_id[i], upstream[i] or own_id[i]}:
+            if key:
+                anchors.setdefault(key, []).append(i)
+
+    # Union all candidates sharing any identifier.
+    for key, members in anchors.items():
+        if len(members) > 1:
+            for m in members[1:]:
+                union(members[0], m)
+
+    # Cross-link: if candidate A's upstream == candidate B's own_id,
+    # they share an upstream measurement.
+    for i in range(n):
+        if upstream[i]:
+            for j in range(n):
+                if i == j:
+                    continue
+                if upstream[i] == own_id[j] or upstream[i] == upstream[j]:
+                    union(i, j)
+                if own_id[i] == upstream[j]:
+                    union(i, j)
+
+    # Collect groups by root.
+    by_root: dict[int, list[int]] = {}
+    for i in range(n):
+        r = find(i)
+        by_root.setdefault(r, []).append(indices[i])
+
+    return list(by_root.values())
 
 
 def _within_tolerance(values: list[float], parameter: str) -> bool:
@@ -662,7 +790,9 @@ def synthesize(
             ),
         )
 
-    # Single independent group
+    # Single independent group — accepted_value ONLY for EXACT_SNIPPET.
+    # NUMERIC_NEAR_CONTEXT (snippet present but window binding loose) is
+    # explicitly NOT auto-accepted. Codex review 2026-04-29.
     rep = accepted_indices[0]
     binding = binding_status.get(rep, EvidenceBindingStatus.NOT_FOUND)
     if binding == EvidenceBindingStatus.VERIFIED_EXACT_SNIPPET:
@@ -673,19 +803,10 @@ def synthesize(
             confidence=Confidence.MEDIUM,
             accepted_value=candidates[rep].value,
             accepted_unit=candidates[rep].unit,
-            rationale="1 candidate, snippet exactly verified in source text.",
-        )
-    if binding == EvidenceBindingStatus.VERIFIED_NUMERIC_NEAR_CONTEXT:
-        return WebParamResult(
-            query=query, candidates=candidates,
-            gate_results=gate_results, binding_status=binding_status,
-            accepted_indices=accepted_indices,
-            confidence=Confidence.LOW,
-            accepted_value=None,
-            accepted_unit=candidates[rep].unit,
             rationale=(
-                "1 candidate, snippet present but value/unit binding only "
-                "loose. Not auto-accepted — review the candidate manually."
+                "1 candidate, snippet exact-bound to source text "
+                "(drug, parameter, value, unit, species co-occur in "
+                "the window around the snippet)."
             ),
         )
     return WebParamResult(
@@ -693,9 +814,12 @@ def synthesize(
         gate_results=gate_results, binding_status=binding_status,
         accepted_indices=accepted_indices,
         confidence=Confidence.LOW,
+        accepted_value=None,
+        accepted_unit=candidates[rep].unit,
         rationale=(
-            "1 candidate, evidence binding could not be verified from "
-            "PubMed/PMC. Not auto-accepted."
+            f"1 candidate with binding={binding.value}. Auto-acceptance "
+            f"requires VERIFIED_EXACT_SNIPPET (window co-occurrence of "
+            f"drug+parameter+value+unit+species). Manual review required."
         ),
     )
 
