@@ -40,11 +40,12 @@ _CACHE_FILE = _CACHE_DIR / "citation_cache.jsonl"
 
 
 class CitationStatus(str, Enum):
-    VERIFIED = "verified"
+    VERIFIED = "verified"             # PMID/DOI exists in PubMed/Crossref
     NOT_FOUND = "not_found"
     UNVERIFIED = "unverified"        # offline mode + cache miss
     NETWORK_ERROR = "network_error"
     INVALID_FORMAT = "invalid_format"
+    TOPIC_MISMATCH = "topic_mismatch"  # PMID exists but title unrelated to claim
 
 
 @dataclass
@@ -272,3 +273,124 @@ def _result_to_dict(r: CitationResult) -> dict:
 
 def cache_path() -> Path:
     return _CACHE_FILE
+
+
+# ---------------------------------------------------------------------
+# Topic-match verification (defends against existing-but-wrong PMIDs)
+# ---------------------------------------------------------------------
+#
+# A PMID can be VERIFIED (exists in PubMed) yet still be the wrong citation
+# for a given parameter — e.g. a PMID about dietary glucose transport cited
+# as "diclofenac plasma binding". This gap was how fabricated citations
+# survived the v2.6 audit. `verify_citation_topic` requires the cached
+# title to share at least one keyword with the claimed parameter context.
+
+# Common stopwords + domain-irrelevant high-frequency terms
+_STOPWORDS = {
+    "a", "an", "and", "the", "of", "in", "on", "for", "to", "with", "from",
+    "by", "at", "as", "is", "are", "was", "were", "be", "been", "being",
+    "this", "that", "these", "those", "it", "its", "their", "his", "her",
+    "or", "but", "not", "no", "if", "than", "so", "such", "into", "onto",
+    "study", "studies", "analysis", "review", "data", "results", "method",
+    "methods", "based", "using", "during", "between", "among", "after",
+    "before", "human", "humans", "subject", "subjects", "patient", "patients",
+}
+
+_TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9\-]{2,}")
+
+
+def _tokenize(text: str) -> set[str]:
+    if not text:
+        return set()
+    return {t.lower() for t in _TOKEN_RE.findall(text)
+            if t.lower() not in _STOPWORDS}
+
+
+def verify_citation_topic(
+    identifier: str,
+    *,
+    claim_keywords: list[str],
+    mode: VerificationMode = "online",
+    min_overlap: int = 1,
+) -> tuple[CitationResult, bool]:
+    """
+    Verify a PMID/DOI exists AND its title topic-matches the claimed
+    parameter keywords.
+
+    Why: the v2.6 audit removed PMIDs that did not exist. But a PMID
+    can exist yet describe an unrelated topic — e.g. PMID 9106794
+    is dietary glucose transport, not diclofenac binding. Existence
+    verification is necessary but not sufficient.
+
+    Parameters
+    ----------
+    identifier : str
+        PMID or DOI.
+    claim_keywords : list[str]
+        Keywords the cited paper should contain (e.g. for a Midazolam
+        Vss claim: ['midazolam', 'distribution'] or ['midazolam', 'PBPK']).
+        Matching is case-insensitive on title only (abstract is not fetched).
+    mode : "online" | "offline" | "strict"
+    min_overlap : int
+        Minimum number of claim_keywords that must appear in the cached
+        title. Default 1.
+
+    Returns
+    -------
+    (CitationResult, topic_ok)
+        result.status == VERIFIED + topic_ok=True   → cite confidently
+        result.status == VERIFIED + topic_ok=False  → existing-but-wrong;
+                                                      result.status is
+                                                      mutated to TOPIC_MISMATCH
+    """
+    result = verify_citation(identifier, mode=mode)
+    if result.status != CitationStatus.VERIFIED:
+        return result, False
+
+    title_tokens = _tokenize(result.title or "")
+    claim_tokens = {k.lower() for k in claim_keywords if k}
+    overlap = title_tokens & claim_tokens
+
+    if len(overlap) < min_overlap:
+        # Existing-but-wrong: surface as a distinct status so callers
+        # cannot accept it as "verified" by checking is_verified() alone.
+        result.status = CitationStatus.TOPIC_MISMATCH
+        result.error = (
+            f"PMID/DOI exists but title '{result.title or ''}' shares no "
+            f"keyword overlap with the claim {sorted(claim_tokens)}. "
+            f"Title tokens: {sorted(title_tokens)[:20]}. This is the "
+            f"'existing-but-wrong citation' failure mode."
+        )
+        return result, False
+    return result, True
+
+
+def audit_citation_cache(
+    *, claim_keywords_per_id: dict[str, list[str]],
+) -> dict[str, str]:
+    """
+    Re-audit existing cache entries for topic match. Pass a mapping of
+    {identifier: [keywords]} where keywords describe what the citation
+    is supposed to support.
+
+    Returns {identifier: verdict} where verdict is one of
+    'topic_match', 'topic_mismatch', 'not_in_cache', 'not_verified'.
+    """
+    cache = _load_cache()
+    out: dict[str, str] = {}
+    for ident, keywords in claim_keywords_per_id.items():
+        # Try both PMID and DOI cache keys
+        rec = cache.get(f"pmid:{ident}") or cache.get(f"doi:{ident}")
+        if rec is None:
+            out[ident] = "not_in_cache"
+            continue
+        if rec.get("status") != CitationStatus.VERIFIED.value:
+            out[ident] = "not_verified"
+            continue
+        title_tokens = _tokenize(rec.get("title") or "")
+        claim_tokens = {k.lower() for k in keywords if k}
+        if title_tokens & claim_tokens:
+            out[ident] = "topic_match"
+        else:
+            out[ident] = "topic_mismatch"
+    return out
