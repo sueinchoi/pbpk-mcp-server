@@ -710,9 +710,28 @@ def register_pbpk_tools(mcp: FastMCP):
 
         output.append(pk.to_markdown(compound.name, dose_mg))
 
-        # Key organ concentrations at Tmax
-        tmax_idx = int(np.argmin(np.abs(result.time - pk.Tmax)))
-        output.append(f"\n### Tissue Concentrations at Tmax ({pk.Tmax:.1f} h)\n")
+        # Key organ concentrations. For IV bolus, Tmax = 0 h (the bolus
+        # injection moment) and tissues haven't received drug yet — that
+        # report row reads "all zero" and looks like distribution failed
+        # (codex UX review 2026-04-30 HIGH). Pick a post-distribution
+        # time instead: max(Tmax, 0.5*t_half) capped at simulation end.
+        is_iv_for_display = route in ("iv_bolus", "iv_infusion")
+        if is_iv_for_display:
+            # Use max(t_half/2, 1 hour) for distribution-phase view, or
+            # the peak of the venous_plasma curve if t_half is invalid.
+            t_dist = max(getattr(pk, "t_half", 0.0) * 0.5, 1.0)
+            t_dist = min(t_dist, float(result.time[-1]))
+            tmax_idx = int(np.argmin(np.abs(result.time - t_dist)))
+            display_t = float(result.time[tmax_idx])
+            tissue_label = (
+                f"Tissue Concentrations at t={display_t:.2f} h (post-distribution; "
+                f"IV bolus Tmax=0 has no tissue mass yet)"
+            )
+        else:
+            tmax_idx = int(np.argmin(np.abs(result.time - pk.Tmax)))
+            display_t = pk.Tmax
+            tissue_label = f"Tissue Concentrations at Tmax ({display_t:.2f} h)"
+        output.append(f"\n### {tissue_label}\n")
         output.append("| Tissue | C_tissue (mg/L) | C_tissue/C_plasma |")
         output.append("|--------|----------------|------------------|")
         c_plasma = result.venous_plasma[tmax_idx] if result.venous_plasma[tmax_idx] > 0 else 1e-10
@@ -1322,7 +1341,38 @@ def register_pbpk_tools(mcp: FastMCP):
             result = ddi_induction(Emax, EC50, I_h_u, fm)
         else:
             result = ddi_net_effect(Ki, KI, kinact, Emax, EC50, I_h_u, fm, kdeg)
-        return result.to_markdown() + echo
+        # Mechanism-scope warning. A reversible-only or induction-only
+        # call is a screening estimate, not a full DDI prediction —
+        # ketoconazole-midazolam returns ~3-4x reversible-only vs
+        # 10-15x literature with MBI included. Codex UX review
+        # 2026-04-30 (HIGH): non-experts may treat the partial answer
+        # as authoritative.
+        scope_warning = ""
+        if mechanism == "reversible":
+            scope_warning = (
+                "\n\n> ⚠️ **Mechanism-scope notice.** This call only models "
+                "reversible (competitive) inhibition. If the perpetrator is "
+                "also a time-dependent / mechanism-based inhibitor (e.g. "
+                "ketoconazole, ritonavir, clarithromycin, fluvoxamine, "
+                "verapamil, itraconazole), the AUC ratio above is a "
+                "**lower bound**. Call again with `mechanism=\"net\"` and "
+                "supply `KI`+`kinact` to include MBI, or use "
+                "`run_dynamic_ddi` for a time-resolved prediction.\n"
+            )
+        elif mechanism == "induction":
+            scope_warning = (
+                "\n\n> ⚠️ **Mechanism-scope notice.** This call only models "
+                "induction. If the perpetrator also inhibits the same enzyme "
+                "(e.g. ritonavir induces and inhibits CYP3A), use "
+                "`mechanism=\"net\"` to capture both effects.\n"
+            )
+        elif mechanism == "mbi":
+            scope_warning = (
+                "\n\n> ℹ️ **Mechanism-scope notice.** MBI-only result; if "
+                "reversible inhibition or induction are also relevant, use "
+                "`mechanism=\"net\"`.\n"
+            )
+        return result.to_markdown() + echo + scope_warning
 
     # ----------------------------------------------------------------
     # ACAT absorption model
