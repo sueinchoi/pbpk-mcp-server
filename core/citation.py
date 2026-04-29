@@ -136,6 +136,94 @@ def _verify_pmid_online(pmid: str, timeout: float = 5.0) -> CitationResult:
         return CitationResult(pmid, "pmid", CitationStatus.NETWORK_ERROR, error=str(e))
 
 
+def fetch_pmid_abstract(pmid: str, timeout: float = 5.0) -> Optional[str]:
+    """
+    Retrieve the abstract text for a PMID via NCBI E-utils efetch.
+
+    Used by the evidence-binding gate in `core/web_param_search.py` —
+    a candidate's quoted snippet must appear in the abstract (or PMC
+    full text, when available) for the candidate to be auto-accepted.
+
+    Returns None on network/parse error so callers must distinguish
+    "abstract unavailable" (network) from "abstract empty" (no result).
+    """
+    if not _HAS_REQUESTS:
+        return None
+    if not _PMID_RE.match(pmid.strip()):
+        return None
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    params = {"db": "pubmed", "id": pmid, "rettype": "abstract", "retmode": "text"}
+    try:
+        r = requests.get(url, params=params, timeout=timeout)
+        r.raise_for_status()
+        text = r.text or ""
+        # E-utils returns the full record; the abstract is typically the
+        # bulk of the body. We return it raw — callers normalize before
+        # snippet matching.
+        return text.strip() or None
+    except requests.exceptions.RequestException:
+        return None
+
+
+def fetch_pmcid_for_pmid(pmid: str, timeout: float = 5.0) -> Optional[str]:
+    """
+    Translate a PMID to its PMCID (PubMed Central ID) via NCBI E-utils
+    elink, when an open-access full-text version is available.
+
+    Returns the PMCID (e.g. "PMC1234567") or None if no PMC record
+    exists for this PMID.
+    """
+    if not _HAS_REQUESTS:
+        return None
+    if not _PMID_RE.match(pmid.strip()):
+        return None
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
+    params = {
+        "dbfrom": "pubmed", "db": "pmc", "id": pmid, "retmode": "json",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+        linksets = data.get("linksets", [])
+        if not linksets:
+            return None
+        for ldb in linksets[0].get("linksetdbs", []):
+            if ldb.get("dbto") == "pmc":
+                links = ldb.get("links", [])
+                if links:
+                    return f"PMC{links[0]}"
+        return None
+    except (requests.exceptions.RequestException, ValueError, KeyError):
+        return None
+
+
+def fetch_pmc_full_text(pmcid: str, timeout: float = 10.0) -> Optional[str]:
+    """
+    Retrieve PMC open-access full-text XML/text for a PMCID. Returns
+    raw response text — callers strip XML tags before snippet matching.
+
+    Only works for PMC open-access subset (PMC OA). Returns None for
+    paywalled / non-OA records.
+    """
+    if not _HAS_REQUESTS:
+        return None
+    pmcid = pmcid.strip().upper()
+    if not pmcid.startswith("PMC"):
+        pmcid = f"PMC{pmcid}"
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    params = {
+        "db": "pmc", "id": pmcid.removeprefix("PMC"), "rettype": "xml",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=timeout)
+        r.raise_for_status()
+        text = r.text or ""
+        return text or None
+    except requests.exceptions.RequestException:
+        return None
+
+
 def _verify_doi_online(doi: str, timeout: float = 5.0) -> CitationResult:
     if not _HAS_REQUESTS:
         return CitationResult(doi, "doi", CitationStatus.NETWORK_ERROR,
