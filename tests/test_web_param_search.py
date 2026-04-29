@@ -593,6 +593,162 @@ def t():
     assert "Confidence" in out and "none" in out.lower()
 
 
+# ---------------------------------------------------------------------
+# Adversarial regression — codex review 2026-04-29
+# ---------------------------------------------------------------------
+print("\n## adversarial regression (codex post-review)")
+
+
+@test("comparator-drug snippet attack: real PMID, real snippet, but drug term missing in window → loose binding (no MEDIUM)")
+def t():
+    """Codex review CRITICAL #1: an LLM submits a real on-topic PMID where
+    the snippet is verbatim from the paper but is the comparator drug's
+    Peff, not the target drug's. Drug term should be missing from the
+    window around the snippet → binding NUMERIC_NEAR_CONTEXT, gate fails,
+    confidence NONE."""
+    def setup():
+        _STUBS.pmids.clear()
+        # Paper title mentions both midazolam and ketoconazole;
+        # snippet content is about ketoconazole comparator value.
+        comparator_snippet = "the comparator ketoconazole peff was 1.8"
+        abstract_text = (
+            "Background: midazolam absorption was studied. "
+            "We compared with ketoconazole. "
+            f"Results: {comparator_snippet}. "
+            "Midazolam was assessed separately."
+        )
+        _STUBS.add_pmid(
+            "ATTACK1",
+            title="Midazolam absorption with ketoconazole comparator",
+            abstract=abstract_text,
+        )
+
+    # LLM tries to submit ketoconazole's snippet as if it were midazolam's Peff
+    q = WebParamQuery(
+        parameter="Peff", drug_name="midazolam",
+        drug_synonyms=["midazolam"],
+        parameter_synonyms=["peff", "permeability"],
+        expected_unit="10^-4 cm/s",
+        expected_range=(0.1, 10.0),
+        species="human", matrix="jejunum",
+    )
+    c = WebParamCandidate(
+        parameter="Peff", drug_name="midazolam",
+        value=1.8, unit="10^-4 cm/s",
+        citation_id="ATTACK1", citation_type="pmid",
+        source_url="https://pubmed.ncbi.nlm.nih.gov/ATTACK1/",
+        snippet="the comparator ketoconazole peff was 1.8",
+        context=MeasurementContext(species="human", matrix="jejunum",
+                                    method="Caco-2"),
+        evidence_class=EvidenceClass.PRIMARY_MEASUREMENT,
+        is_direct_measurement=True,
+    )
+    res = _full_run(setup, [c], query=q)
+    assert res.confidence == Confidence.NONE, \
+        f"comparator-drug attack passed: {res.confidence}"
+    # Sanity: the binding status should be NUMERIC_NEAR_CONTEXT (snippet
+    # found but window missing the target drug term).
+    assert res.binding_status[0] == EvidenceBindingStatus.VERIFIED_NUMERIC_NEAR_CONTEXT
+
+
+@test("pre-converted unit attack: LLM-declared unit not in source window → loose binding (no auto-acceptance)")
+def t():
+    """Codex review CRITICAL #2: LLM pre-converts '50 mL/min/kg' to '3500 L/h'
+    using its own assumed body weight, declares the post-conversion unit.
+    Source contains 'mL/min/kg' but the LLM submits 'L/h'. The window
+    should NOT contain 'l/h' so binding fails strict gate."""
+    def setup():
+        _STUBS.pmids.clear()
+        # Source paper reports value in mL/min/kg, not L/h
+        snippet = "midazolam clearance was 50 ml min kg in human hepatocytes"
+        _STUBS.add_pmid(
+            "ATTACK2",
+            title="Midazolam clearance human hepatocyte",
+            abstract=f"Methods: RED. {snippet}. Conclusion.",
+        )
+
+    q = WebParamQuery(
+        parameter="CL_int", drug_name="midazolam",
+        parameter_synonyms=["clearance"],
+        expected_unit="L/h",  # what the model wants
+        species="human", matrix="hepatocyte",
+    )
+    c = WebParamCandidate(
+        parameter="CL_int", drug_name="midazolam",
+        value=3500.0, unit="L/h",  # pre-converted, post-conversion unit
+        citation_id="ATTACK2", citation_type="pmid",
+        source_url="https://pubmed.ncbi.nlm.nih.gov/ATTACK2/",
+        snippet="midazolam clearance was 50 ml min kg in human hepatocytes",
+        context=MeasurementContext(species="human", matrix="hepatocyte",
+                                    method="RED"),
+        evidence_class=EvidenceClass.PRIMARY_MEASUREMENT,
+        is_direct_measurement=True,
+    )
+    res = _full_run(setup, [c], query=q)
+    # Either rejected at unit_check (string mismatch L/h vs the source's
+    # actual unit) — but the candidate's declared unit IS 'L/h' which
+    # matches the query's expected_unit, so unit_check passes.
+    # The defense must come from window binding: '3500' won't be in the
+    # window because the source says '50'. So evidence_binding fails.
+    assert res.confidence == Confidence.NONE, \
+        f"pre-conversion attack passed: {res.confidence}"
+
+
+@test("missing matrix when query specifies matrix → context_match rejects")
+def t():
+    """Codex review HIGH: candidate.matrix='' should NOT silently pass when
+    query.matrix is specified. Previously, missing matrix on candidate
+    was treated as 'unspecified' and passed."""
+    def setup():
+        _STUBS.pmids.clear()
+        _STUBS.add_pmid("CTX1", title="midazolam fu_hep RED",
+                        abstract="midazolam fu_hep 0.05 unitless human hepatocyte")
+    q = _midaz_query()  # query.matrix = "hepatocyte"
+    c = _good_candidate(pmid="CTX1", matrix="")  # candidate omits matrix
+    res = _full_run(setup, [c], query=q)
+    cg = next(g for g in res.gate_results[0] if g.gate == "context_match")
+    assert not cg.passed, "missing candidate.matrix passed the gate"
+    assert "matrix" in cg.reason
+
+
+@test("union-find: bridging candidate transitively merges 3 candidates")
+def t():
+    """Codex review HIGH: ad-hoc independence loop missed transitivity.
+    C1.upstream=X, C2.upstream=Y, C3.upstream=X with C3.cite=C2.cite
+    must all collapse to one group (C1↔C3 via upstream X, C2↔C3 via cite)."""
+    c1 = _good_candidate(pmid="P1")
+    c1.upstream_citation_id = "X"
+    c2 = _good_candidate(pmid="P2")
+    c2.upstream_citation_id = "Y"
+    c3 = _good_candidate(pmid="P2")  # same cite as c2
+    c3.upstream_citation_id = "X"     # same upstream as c1
+    pairs = [(0, c1), (1, c2), (2, c3)]
+    groups = _classify_independence(pairs)
+    assert len(groups) == 1, f"bridging not detected, got {len(groups)} groups: {groups}"
+
+
+@test("synthesis: 2 candidates with NUMERIC_NEAR_CONTEXT binding → never HIGH")
+def t():
+    """Codex review CRITICAL #2: even if the LLM submits two candidates
+    that both pass loose binding (snippet present but window incomplete),
+    they cannot get HIGH. Binding gate now requires EXACT_SNIPPET."""
+    def setup():
+        _STUBS.pmids.clear()
+        # Snippet present but neither value nor unit nor drug terms
+        # appear in the window
+        snip1 = "fraction unbound was determined elsewhere"
+        snip2 = "fraction unbound was reported separately"
+        _STUBS.add_pmid("LOOSE1", title="midazolam fu",
+                        abstract=f"Methods: {snip1}. Tables in supplement.")
+        _STUBS.add_pmid("LOOSE2", title="midazolam fu_hep paper two",
+                        abstract=f"Methods: {snip2}. Tables in supplement.")
+    c1 = _good_candidate(pmid="LOOSE1", snippet="fraction unbound was determined elsewhere")
+    c2 = _good_candidate(pmid="LOOSE2", snippet="fraction unbound was reported separately")
+    res = _full_run(setup, [c1, c2])
+    assert res.confidence != Confidence.HIGH, \
+        f"loose binding got HIGH: {res.confidence}"
+
+
 # ============================================================
 print("\n" + "=" * 60)
 print(f"Passed: {len(PASSED)}/{len(PASSED) + len(FAILED)}")
