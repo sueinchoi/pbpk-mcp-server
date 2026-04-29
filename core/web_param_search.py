@@ -455,6 +455,25 @@ def _strip_xml(text: str) -> str:
 _BINDING_WINDOW_CHARS = 600
 
 
+# Species → common abstract synonyms. Empirical: many primary papers use
+# "man", "patients", "volunteers", "subjects" rather than the literal
+# species name. The window-bind accepts any synonym from this set.
+_SPECIES_SYNONYMS: dict[str, list[str]] = {
+    "human": ["human", "humans", "man", "men", "women", "woman",
+              "patient", "patients", "volunteer", "volunteers",
+              "subject", "subjects", "adult", "adults", "infant",
+              "infants", "neonate", "neonates", "pediatric", "child",
+              "children"],
+    "rat": ["rat", "rats", "rodent", "rodents", "sprague", "wistar"],
+    "mouse": ["mouse", "mice", "murine"],
+    "dog": ["dog", "dogs", "canine", "beagle"],
+    "monkey": ["monkey", "monkeys", "primate", "primates",
+               "cynomolgus", "rhesus", "macaque"],
+    "rabbit": ["rabbit", "rabbits"],
+    "minipig": ["minipig", "minipigs", "pig", "swine"],
+}
+
+
 def _bind_in_window(
     text_norm: str, snippet_norm: str, c: WebParamCandidate, q: WebParamQuery,
 ) -> tuple[bool, str]:
@@ -489,13 +508,18 @@ def _bind_in_window(
     if param_terms and not any(t in window for t in param_terms):
         missing.append(f"param∈{param_terms}")
 
-    # Species and matrix bind: at least the species must appear in the
-    # window (matrix is bound separately via context_match gate, but
-    # we add it here as a soft signal).
+    # Species and matrix bind: at least the species (or one of its
+    # common abstract synonyms — "man", "patients", "rats" etc.) must
+    # appear in the window. Real primary papers rarely use the literal
+    # taxonomic term; calibration via _SPECIES_SYNONYMS prevents this
+    # gate from rejecting legitimate sources for purely lexical reasons
+    # (the comparator-drug attack defended by the drug-term check is
+    # the actual security boundary).
     if q.species:
         spec_norm = _normalize_text(q.species)
-        if spec_norm and spec_norm not in window:
-            missing.append(f"species={spec_norm}")
+        synonyms = _SPECIES_SYNONYMS.get(spec_norm, [spec_norm])
+        if spec_norm and not any(s in window for s in synonyms):
+            missing.append(f"species∈{synonyms[:5]}")
 
     if missing:
         return False, f"window-bind missing: {missing}"
