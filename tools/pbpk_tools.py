@@ -2464,6 +2464,186 @@ def register_pbpk_tools(mcp: FastMCP):
         )
         return guide
 
+    # ----------------------------------------------------------------
+    # Web-search anti-hallucination layer (8th safety layer)
+    # ----------------------------------------------------------------
+
+    @mcp.tool()
+    def search_parameter_with_citation(
+        parameter: str,
+        drug_name: str,
+        candidates_json: str,
+        drug_synonyms: str = "",
+        parameter_synonyms: str = "",
+        expected_unit: str = "",
+        expected_range_lo: Optional[float] = None,
+        expected_range_hi: Optional[float] = None,
+        species: str = "human",
+        matrix: str = "",
+        notes: str = "",
+    ) -> str:
+        """
+        Verify LLM-supplied web-search candidates for a PBPK parameter.
+
+        ANTI-FABRICATION CONTRACT — read before using.
+
+        This tool DOES NOT search the web. It verifies what the LLM driver
+        already retrieved. The driver (you, Claude, or any other LLM) is
+        responsible for issuing the search; this tool is the gatekeeper that
+        prevents the driver from passing fabricated values into a model.
+
+        Each candidate in `candidates_json` MUST carry: value, unit,
+        citation_id (PMID or DOI), citation_type, source_url, snippet
+        (verbatim quoted text from the source), and a measurement context
+        (species, matrix, method). Missing any required field → rejected.
+
+        Eight gates run per candidate:
+          1. required_fields    — every required field populated
+          2. citation_exists    — PMID/DOI verified via PubMed/Crossref
+          3. topic_match        — title shares ≥1 keyword with drug+parameter
+          4. evidence_class     — primary_measurement / regulatory_review /
+                                  curated_db_with_source ONLY are auto-acceptable
+          5. range_check        — value within expected_range
+          6. unit_check         — unit string matches expected_unit
+          7. context_match      — species/matrix matches the query
+          8. evidence_binding   — server fetches the abstract (or PMC OA full
+                                  text) and verifies the snippet, value, and
+                                  unit appear in retrievable text. This is the
+                                  defense against "right paper, wrong number."
+
+        Confidence states (codex review 2026-04-29):
+          - high     ≥2 INDEPENDENT measurement groups within tolerance
+          - medium   1 candidate, snippet exactly verified
+          - low      1 candidate, only loose binding or only metadata
+          - conflict ≥2 verified candidates that disagree beyond tolerance
+                     (NEVER auto-merged — this is intentional; the codex
+                     review flagged geomean of 0.5 and 50 → 5 as the
+                     dominant silent-failure mode of naive merging)
+          - none     no candidate passed all hard gates
+
+        Independence (laundering defense):
+          Two candidates with the same `upstream_citation_id`, or where
+          one's `citation_id` appears as the other's `upstream_citation_id`,
+          collapse to ONE evidence group. "Two papers that both cite the
+          same upstream measurement" is one source, not two.
+
+        Args:
+            parameter: PBPK parameter symbol — 'fu_hep', 'R_bp', 'Peff',
+                'CL_int', 'fu_p', 'MW', 'logP', etc.
+            drug_name: target compound name.
+            candidates_json: JSON list of candidate objects. Each object:
+                {
+                  "value": 0.05, "unit": "unitless",
+                  "citation_id": "12345678", "citation_type": "pmid",
+                  "source_url": "https://...",
+                  "snippet": "verbatim text from source",
+                  "context": {"species": "human", "matrix": "hepatocyte",
+                              "method": "RED"},
+                  "evidence_class": "primary_measurement",
+                  "evidence_location": {"section": "Results",
+                                        "table": "Table 2"},
+                  "upstream_citation_id": null,
+                  "is_direct_measurement": true,
+                  "raw_search_query": "midazolam fu hepatocyte"
+                }
+            drug_synonyms: comma-separated additional names for topic match.
+            parameter_synonyms: comma-separated parameter aliases.
+            expected_unit: e.g. 'unitless', 'L/h', '10^-4 cm/s'.
+            expected_range_lo, expected_range_hi: physiological range.
+            species: 'human', 'rat', etc.
+            matrix: 'plasma', 'hepatocyte', 'HLM', 'jejunum', etc.
+            notes: free-text context for the audit log.
+
+        Returns:
+            Markdown table of every candidate with per-gate result, the
+            final confidence state, and the audit trail path. Never
+            silently drops a rejected candidate.
+        """
+        from core.web_param_search import (
+            WebParamQuery, WebParamCandidate, MeasurementContext,
+            EvidenceLocation, EvidenceClass,
+            search_and_verify,
+        )
+
+        try:
+            raw = json.loads(candidates_json) if candidates_json else []
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"candidates_json must be valid JSON list: {e}. "
+                f"Each candidate must include value, unit, citation_id, "
+                f"citation_type, source_url, snippet, and context."
+            )
+        if not isinstance(raw, list):
+            raise ValueError("candidates_json must be a JSON list, not object.")
+
+        query = WebParamQuery(
+            parameter=parameter,
+            drug_name=drug_name,
+            drug_synonyms=[s.strip() for s in drug_synonyms.split(",") if s.strip()],
+            parameter_synonyms=[s.strip() for s in parameter_synonyms.split(",") if s.strip()],
+            expected_unit=expected_unit,
+            expected_range=(
+                (expected_range_lo, expected_range_hi)
+                if expected_range_lo is not None and expected_range_hi is not None
+                else None
+            ),
+            species=species,
+            matrix=matrix,
+            notes=notes,
+        )
+
+        candidates = []
+        for i, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"candidate[{i}] is not a JSON object")
+            ctx_d = item.get("context", {}) or {}
+            loc_d = item.get("evidence_location", {}) or {}
+            try:
+                evidence_class = EvidenceClass(
+                    item.get("evidence_class", "unknown")
+                )
+            except ValueError:
+                evidence_class = EvidenceClass.UNKNOWN
+            try:
+                cand = WebParamCandidate(
+                    parameter=item.get("parameter", parameter),
+                    drug_name=item.get("drug_name", drug_name),
+                    value=float(item["value"]),
+                    unit=str(item["unit"]),
+                    citation_id=str(item.get("citation_id", "")),
+                    citation_type=str(item.get("citation_type", "")),
+                    source_url=str(item.get("source_url", "")),
+                    snippet=str(item.get("snippet", "")),
+                    context=MeasurementContext(
+                        species=ctx_d.get("species", ""),
+                        matrix=ctx_d.get("matrix", ""),
+                        method=ctx_d.get("method", ""),
+                        assay=ctx_d.get("assay", ""),
+                        temperature_C=ctx_d.get("temperature_C"),
+                        pH=ctx_d.get("pH"),
+                    ),
+                    evidence_class=evidence_class,
+                    evidence_location=EvidenceLocation(
+                        section=loc_d.get("section", ""),
+                        table=loc_d.get("table", ""),
+                        figure=loc_d.get("figure", ""),
+                        page=loc_d.get("page", ""),
+                        supplementary_file=loc_d.get("supplementary_file", ""),
+                    ),
+                    upstream_citation_id=item.get("upstream_citation_id"),
+                    is_direct_measurement=bool(item.get("is_direct_measurement", False)),
+                    raw_search_query=item.get("raw_search_query", ""),
+                )
+            except (KeyError, ValueError, TypeError) as e:
+                raise ValueError(
+                    f"candidate[{i}] is malformed: {e}. Required fields: "
+                    f"value, unit, citation_id, citation_type, source_url, snippet."
+                )
+            candidates.append(cand)
+
+        result = search_and_verify(query, candidates)
+        return result.to_markdown()
+
 
 def _generate_plot(
     result: SimulationResult,

@@ -47,7 +47,17 @@ mcp = FastMCP(
         "check (1% tolerance). If body_burden + eliminated + lumen_remaining "
         "differs from total_input by more than 1%, the simulation ABORTS "
         "with an explicit error. Do not interpret a successful run as "
-        "evidence of correctness without consulting the audit fingerprint."
+        "evidence of correctness without consulting the audit fingerprint.\n\n"
+        "6. WEB-SEARCH GROUNDING: When the user asks you to retrieve a PBPK "
+        "parameter from the web/literature, you MUST use the "
+        "search_parameter_with_citation tool. Every numeric value you "
+        "propose must be paired with (PMID|DOI, source_url, verbatim "
+        "snippet, measurement context). The server fetches the abstract "
+        "or PMC OA full text and verifies your snippet appears in the "
+        "source. Fabricated values, fabricated PMIDs, real PMIDs for "
+        "wrong topics, and 'right paper, wrong number' submissions are "
+        "all rejected. Read the `web_search_grounding` MCP prompt for "
+        "the full contract before issuing a search query."
     ),
 )
 
@@ -84,6 +94,27 @@ def get_status() -> str:
 def pbpk_setup_guide() -> str:
     """Interactive guide for setting up a new PBPK simulation."""
     return format_user_guide()
+
+
+@mcp.prompt()
+def web_search_grounding() -> str:
+    """Anti-hallucination contract for any LLM driver performing web
+    parameter search. Read BEFORE issuing a search query.
+
+    Defines the required candidate fields (value, unit, citation_id,
+    citation_type, source_url, verbatim snippet, measurement context),
+    the eight verification gates run by `search_parameter_with_citation`,
+    the five confidence states (high/medium/low/conflict/none), and the
+    laundering and auto-merge defenses encoded in the gate ordering.
+
+    The server enforces this contract at the schema layer — this prompt
+    is the discipline document the LLM driver should consult before
+    composing a candidate list. Reading and following this prompt is
+    the difference between candidates that pass and candidates that
+    are silently rejected with status NOT_FOUND or TOPIC_MISMATCH.
+    """
+    from prompts.web_search_grounding import get_grounding_prompt
+    return get_grounding_prompt()
 
 
 @mcp.prompt()
