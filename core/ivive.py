@@ -119,13 +119,24 @@ def scale_microsomal_clint(
     Returns:
         Dict with CLint_in_vivo (L/h), fu_inc, scaling_factor, etc.
     """
+    fu_inc_source = "measured"
     if fu_inc is None:
         if logP is None:
             raise ValueError("Either fu_inc or logP must be provided")
+        if logP == 0.0:
+            # Sentinel logP from a tool default — Hallifax/Austin prediction
+            # from logP=0 yields fu_inc≈1.0, masking high-binding compounds.
+            raise ValueError(
+                "scale_microsomal_clint: fu_inc is None AND logP=0.0 (sentinel "
+                "default). Predicting fu_inc from logP=0 silently assumes ~100% "
+                "unbound, which is wrong for most lipophilic drugs and shifts "
+                "CLint_in_vivo by >2x. Provide a measured fu_inc OR a real logP."
+            )
         from .compound import CompoundSpec, CompoundType
         dummy = CompoundSpec(name="tmp", mw=300, logP=logP, pKa=7.0,
                             fu_p=1.0, compound_type=CompoundType.NEUTRAL)
         fu_inc = predict_fu_inc(dummy, protein_conc)
+        fu_inc_source = "predicted_from_logP"
 
     if liver_weight_g is None:
         factor = LIVER_WEIGHT_MALE_PER_KG if sex == "male" else LIVER_WEIGHT_FEMALE_PER_KG
@@ -141,6 +152,7 @@ def scale_microsomal_clint(
         "CLint_vitro_uL_min_mg": clint_vitro,
         "CLint_unbound_uL_min_mg": clint_unbound,
         "fu_inc": fu_inc,
+        "fu_inc_source": fu_inc_source,
         "MPPGL": mppgl,
         "liver_weight_g": liver_weight_g,
         "scaling_factor": mppgl * liver_weight_g * 60.0 / 1e6,
@@ -176,14 +188,30 @@ def scale_hepatocyte_clint(
     Returns:
         Dict with CLint_in_vivo (L/h) and intermediate values.
     """
+    fu_hep_source = "measured"
     if fu_hep is None:
-        if logP is not None:
-            from .compound import CompoundSpec, CompoundType
-            dummy = CompoundSpec(name="tmp", mw=300, logP=logP, pKa=7.0,
-                                fu_p=1.0, compound_type=CompoundType.NEUTRAL)
-            fu_hep = predict_fu_inc(dummy, 1.0)  # approximation
-        else:
-            fu_hep = 1.0
+        if logP is None:
+            # Refuse-to-default: silently assuming fu_hep=1.0 yields the
+            # uncorrected CLint and looks like a successful IVIVE run.
+            raise ValueError(
+                "scale_hepatocyte_clint: fu_hep is None AND logP is None. "
+                "Falling back to fu_hep=1.0 silently produces an uncorrected "
+                "in-vivo CLint (no binding correction), which is wrong for "
+                "lipophilic drugs by >2x. Provide a measured fu_hep OR a "
+                "real logP for prediction."
+            )
+        if logP == 0.0:
+            raise ValueError(
+                "scale_hepatocyte_clint: fu_hep is None AND logP=0.0 "
+                "(sentinel default). Austin/Hallifax prediction from logP=0 "
+                "yields fu_hep≈1.0, masking high-binding compounds. Provide "
+                "a measured fu_hep OR a real logP."
+            )
+        from .compound import CompoundSpec, CompoundType
+        dummy = CompoundSpec(name="tmp", mw=300, logP=logP, pKa=7.0,
+                            fu_p=1.0, compound_type=CompoundType.NEUTRAL)
+        fu_hep = predict_fu_inc(dummy, 1.0)  # approximation
+        fu_hep_source = "predicted_from_logP"
 
     if liver_weight_g is None:
         factor = LIVER_WEIGHT_MALE_PER_KG if sex == "male" else LIVER_WEIGHT_FEMALE_PER_KG
@@ -196,6 +224,7 @@ def scale_hepatocyte_clint(
         "CLint_in_vivo_L_per_h": clint_in_vivo,
         "CLint_hep_uL_min_1e6cells": clint_hep,
         "fu_hep": fu_hep,
+        "fu_hep_source": fu_hep_source,
         "HPGL": hpgl,
         "liver_weight_g": liver_weight_g,
         "scaling_factor": hpgl * liver_weight_g * 60.0 / 1e6,

@@ -729,8 +729,28 @@ class PBPKModel:
         N_TOTAL = N_STATES_PERFUSION + N_ACAT_STATES  # 16 + 27 = 43
 
         # Build ACAT segment parameters
-        Peff = c.Peff if c.Peff is not None else 5.0
-        S0 = c.S0 if c.S0 is not None else 1.0
+        # Peff and S0 are CRITICAL for ACAT — silent defaults of 5.0 and 1.0
+        # cause Fa, Tmax, Cmax, oral AUC to be wrong by multiples. Refuse-to-default
+        # invariant: ACAT requires measured (Caco-2 Papp/human Peff) or literature
+        # values. See CLAUDE.md "Modeling workflow rule (MANDATORY)".
+        if c.Peff is None:
+            raise ValueError(
+                f"ACAT absorption requires `Peff` (effective permeability, "
+                f"x10^-4 cm/s) for compound `{c.name}`. Silent default of "
+                f"5.0 would fabricate oral Fa/Cmax/AUC. Provide Caco-2 Papp "
+                f"or human Peff. Use `absorption_model=\"first_order\"` if "
+                f"only ka is available."
+            )
+        if c.S0 is None:
+            raise ValueError(
+                f"ACAT absorption requires `S0` (intrinsic aqueous solubility, "
+                f"mg/mL) for compound `{c.name}`. Silent default of 1.0 would "
+                f"fabricate dissolution kinetics for a BCS II/IV drug. Provide "
+                f"the measured solubility or set `absorption_model="
+                f"\"first_order\"`."
+            )
+        Peff = c.Peff
+        S0 = c.S0
         fu_gut = predict_fu_gut(c) if c.fu_p < 1.0 else 1.0
 
         formulation = FormulationSpec(

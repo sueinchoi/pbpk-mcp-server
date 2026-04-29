@@ -481,16 +481,26 @@ def register_pbpk_tools(mcp: FastMCP):
             gut_pgp_km=gut_pgp_km, gut_pgp_vmax=gut_pgp_vmax,
         )
 
+        # Resolve logP from library compound if the user picked one — otherwise
+        # IVIVE would receive the tool's sentinel logP=0.0 and silently predict
+        # fu_inc≈1.0 (or now raise after the v2.8 hardening). Library logP is
+        # the authoritative value for library compounds.
+        ivive_logP = logP
+        if name and name.lower() in COMPOUND_LIBRARY:
+            lib_compound = COMPOUND_LIBRARY[name.lower()]
+            if logP == 0.0 and lib_compound.logP != 0.0:
+                ivive_logP = lib_compound.logP
+
         if clearance_source == "hlm" and CLint_vitro_hlm is not None:
             from core.ivive import scale_microsomal_clint
-            ivive_r = scale_microsomal_clint(CLint_vitro_hlm, logP=logP,
+            ivive_r = scale_microsomal_clint(CLint_vitro_hlm, logP=ivive_logP,
                 protein_conc=protein_conc, body_weight=body_weight, sex=sex)
             cl_int_resolved = ivive_r["CLint_in_vivo_L_per_h"]
             ivive_info = f"IVIVE (HLM): {CLint_vitro_hlm} µL/min/mg → {cl_int_resolved:.1f} L/h"
 
         elif clearance_source == "hepatocyte" and CLint_vitro_hep is not None:
             from core.ivive import scale_hepatocyte_clint
-            ivive_r = scale_hepatocyte_clint(CLint_vitro_hep, logP=logP,
+            ivive_r = scale_hepatocyte_clint(CLint_vitro_hep, logP=ivive_logP,
                 body_weight=body_weight, sex=sex)
             cl_int_resolved = ivive_r["CLint_in_vivo_L_per_h"]
             ivive_info = f"IVIVE (Hepatocyte): {CLint_vitro_hep} µL/min/10^6 → {cl_int_resolved:.1f} L/h"
@@ -510,6 +520,17 @@ def register_pbpk_tools(mcp: FastMCP):
         # --- Build compound ---
         if name.lower() in COMPOUND_LIBRARY:
             compound = COMPOUND_LIBRARY[name.lower()]
+            # Library compounds may not carry Peff/S0 (most don't). When the
+            # user is running ACAT, allow them to supply Peff/S0 directly to
+            # complete the spec instead of silently failing into the
+            # ACAT-guard error in pbpk_model.
+            if absorption_model == "acat" and (compound.Peff is None or compound.S0 is None):
+                from dataclasses import replace as _dc_replace
+                compound = _dc_replace(
+                    compound,
+                    Peff=Peff if compound.Peff is None else compound.Peff,
+                    S0=S0 if compound.S0 is None else compound.S0,
+                )
         else:
             metabolism = MetabolismModel.FIRST_ORDER
             if Vmax is not None and Km is not None:
@@ -988,10 +1009,20 @@ def register_pbpk_tools(mcp: FastMCP):
         Returns:
             Path to the saved plot image.
         """
-        # Build compound
+        from core.validation import require_compound_input
+        require_compound_input(name=name, library=COMPOUND_LIBRARY,
+                               logP=logP, pKa=pKa, fu_p=fu_p, mw=mw,
+                               tool_name="plot_concentration")
         if name.lower() in COMPOUND_LIBRARY:
             compound = COMPOUND_LIBRARY[name.lower()]
         else:
+            if CL_int <= 0 and CL_renal <= 0:
+                raise ValueError(
+                    "plot_concentration: custom compound has no clearance "
+                    "(CL_int=0 and CL_renal=0). The drug would not be "
+                    "eliminated and the plot would be a fabricated profile. "
+                    "Provide CL_int (L/h) and/or CL_renal (L/h)."
+                )
             compound = CompoundSpec(
                 name=name or "Custom Compound",
                 mw=mw, logP=logP, pKa=pKa,
@@ -1494,8 +1525,11 @@ def register_pbpk_tools(mcp: FastMCP):
         """
         # Hard validation: kp_method enum (typos previously silently
         # ran with R&R)
-        from core.validation import validate_kp_method
+        from core.validation import validate_kp_method, require_compound_input
         validate_kp_method(kp_method)
+        require_compound_input(name=name, library=COMPOUND_LIBRARY,
+                               logP=logP, pKa=pKa, fu_p=fu_p, mw=mw,
+                               tool_name="run_population_pbpk")
         # If a custom compound, range-check the supplied physchem
         in_lib_pop = name and name.lower() in COMPOUND_LIBRARY
         if not in_lib_pop:
@@ -1512,6 +1546,13 @@ def register_pbpk_tools(mcp: FastMCP):
                 CL_int=CL_int if CL_int > 0 else None,
                 CL_renal=CL_renal if CL_renal > 0 else None,
             ))
+            if CL_int <= 0 and CL_renal <= 0:
+                raise ValueError(
+                    "run_population_pbpk: custom compound has no clearance "
+                    "(CL_int=0 and CL_renal=0). Population percentiles would "
+                    "be fabricated for a non-eliminating drug. Provide "
+                    "CL_int (L/h) and/or CL_renal (L/h)."
+                )
         if name.lower() in COMPOUND_LIBRARY:
             compound = COMPOUND_LIBRARY[name.lower()]
         else:
