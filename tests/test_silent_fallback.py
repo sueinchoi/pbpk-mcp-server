@@ -309,12 +309,14 @@ def t():
     )
     assert "⚠️" not in out, f"unexpected warning:\n{out}"
 
-@test("47 tools registered (35 PBPK + 10 session/audit + 2 citation)")
+@test("48 tools registered (36 PBPK + 10 session/audit + 2 citation)")
 def t():
     tools = _server()
-    assert len(tools) == 47, f"expected 47 tools, got {len(tools)}"
+    assert len(tools) == 48, f"expected 48 tools, got {len(tools)}"
     assert "search_parameter_with_citation" in tools, \
         "anti-hallucination tool not registered"
+    assert "fit_to_observed_multi" in tools, \
+        "multi-dataset co-fitting tool not registered"
 
 # ============================================================
 # Section 6: Determinism — same input → same NCA result

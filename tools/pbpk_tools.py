@@ -2204,26 +2204,193 @@ def register_pbpk_tools(mcp: FastMCP):
     @mcp.tool()
     def fit_to_observed(
         csv_file: str = "",
-        compound_name: str = "caffeine",
-        dose_mg: float = 200.0,
+        compound_name: str = "",
+        dose_mg: float = 0.0,
         route: str = "oral",
+        params_to_fit: str = "",
+        # Custom compound (used if compound_name not in library)
+        logP: Optional[float] = None,
+        pKa: Optional[float] = None,
+        fu_p: Optional[float] = None,
+        mw: Optional[float] = None,
+        compound_type: str = "neutral",
+        R_bp: float = 1.0,
+        body_weight: float = 73.0,
+        overrides: str = "",
+        method: str = "nelder-mead",
     ) -> str:
         """
-        Fit PBPK model parameters to observed PK data from CSV file.
+        Fit PBPK model parameters to a single observed PK dataset.
 
         CSV format: two columns (time_h, concentration_mg_L).
-        Fits CL_int and ka (oral) to minimize weighted residuals.
+
+        Allowed fittable parameters (codex policy 2026-04-30):
+            CL_int, CL_renal, ka, Fa, Vmax, Km
+
+        FORBIDDEN combinations (raise unless override token supplied):
+          - CL_int + fu_p (well-stirred CL coupling — fu_p must be measured)
+          - Fa + Fg (oral exposure identifies only their product)
+          - Fa + ka (without IV reference dataset)
+          - CL_int + CL_renal (without urine-excretion data)
+          - Vmax + Km (without dose-ranging data)
+
+        For coupled parameters, use `fit_to_observed_multi` with both
+        IV and oral datasets so identifiability is satisfied by design.
 
         Args:
-            csv_file: Path to CSV file with observed data.
-            compound_name: Drug name from library.
+            csv_file: Path to CSV with time,concentration columns.
+            compound_name: Drug name from library OR custom name.
             dose_mg: Dose (mg).
-            route: "oral" or "iv_bolus".
+            route: "oral", "iv_bolus", or "iv_infusion".
+            params_to_fit: Comma-separated names. Default: 'CL_int' for IV,
+                'CL_int,ka' for oral.
+            logP, pKa, fu_p, mw: Required when compound_name is NOT a
+                library compound. Sentinel defaults rejected.
+            compound_type, R_bp: Custom compound only.
+            overrides: Comma-separated override tokens to permit a
+                forbidden combination (e.g.
+                'fu_measured_separately,iv_reference_codataset').
+                Each token must match a forbidden-combo policy entry.
+            method: 'nelder-mead' (local) or 'differential-evolution' (global).
+
+        Returns:
+            Markdown FitReport with fitted parameters, GOF, FIM-based
+            identifiability diagnostics, and structured warnings.
+            Never a regulatory pass/fail.
         """
         if not csv_file:
             return "Please provide csv_file path."
-        from core.data_fitting import fit_pbpk_to_data
-        return fit_pbpk_to_data(csv_file, compound_name, dose_mg, route)
+        if not compound_name:
+            return "Please provide compound_name (library name or custom)."
+        if dose_mg <= 0:
+            raise ValueError("dose_mg must be positive (mg).")
+        from core.data_fitting import fit_pbpk_to_data, Dataset, fit_pbpk
+        params_list = (
+            [p.strip() for p in params_to_fit.split(",") if p.strip()]
+            if params_to_fit else None
+        )
+        override_set = (
+            {t.strip() for t in overrides.split(",") if t.strip()}
+            if overrides else None
+        )
+        return fit_pbpk_to_data(
+            observed_file=csv_file,
+            compound_name=compound_name,
+            dose_mg=dose_mg, route=route,
+            params_to_fit=params_list,
+            body_weight=body_weight,
+            logP=logP, pKa=pKa, fu_p=fu_p, mw=mw,
+            compound_type=compound_type, R_bp=R_bp,
+            overrides=override_set,
+        )
+
+    @mcp.tool()
+    def fit_to_observed_multi(
+        datasets_json: str,
+        compound_name: str,
+        params_to_fit: str = "CL_int,ka",
+        # Custom compound
+        logP: Optional[float] = None,
+        pKa: Optional[float] = None,
+        fu_p: Optional[float] = None,
+        mw: Optional[float] = None,
+        compound_type: str = "neutral",
+        R_bp: float = 1.0,
+        body_weight: float = 73.0,
+        overrides: str = "",
+        method: str = "nelder-mead",
+    ) -> str:
+        """
+        Multi-dataset co-fitting. The principled way to fit clearance +
+        absorption simultaneously: pair an IV dataset (gives clearance
+        without absorption confound) with an oral dataset (gives ka and
+        bioavailability against the IV reference).
+
+        `datasets_json` is a JSON list of objects. Each object:
+          {
+            "csv_file": "/path/to/data.csv",
+            "dose_mg": 5.0,
+            "route": "iv_bolus" | "oral" | "iv_infusion",
+            "label": "optional name for the dataset",
+            "weight": 1.0
+          }
+
+        The same parameter SET is fit jointly across all datasets.
+        ka is automatically inactive on IV datasets (the parameter
+        exists in the compound but is unused for that route).
+
+        Example use case (codex SHIP-NOW):
+            fit_to_observed_multi(
+              datasets_json='[{"csv_file":"midaz_iv.csv","dose_mg":2,"route":"iv_bolus"},
+                              {"csv_file":"midaz_po.csv","dose_mg":7.5,"route":"oral"}]',
+              compound_name="midazolam",
+              params_to_fit="CL_int,ka,Fa",
+              overrides="iv_reference_codataset"
+            )
+
+        Args:
+            datasets_json: JSON list as above.
+            compound_name: Library OR custom.
+            params_to_fit: Comma-separated names from the policy allowlist.
+            logP, pKa, fu_p, mw: Required for custom compound.
+            overrides: Comma-separated override tokens.
+            method: 'nelder-mead' or 'differential-evolution'.
+
+        Returns:
+            Markdown FitReport (same format as fit_to_observed).
+        """
+        from core.data_fitting import fit_pbpk, Dataset
+        try:
+            raw = json.loads(datasets_json)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"datasets_json must be valid JSON list: {e}"
+            )
+        if not isinstance(raw, list) or not raw:
+            raise ValueError(
+                "datasets_json must be a non-empty JSON list."
+            )
+        ds_list = []
+        for i, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"datasets[{i}] must be a JSON object")
+            try:
+                ds_list.append(Dataset(
+                    csv_file=item["csv_file"],
+                    dose_mg=float(item["dose_mg"]),
+                    route=item.get("route", "oral"),
+                    label=item.get("label", ""),
+                    weight=float(item.get("weight", 1.0)),
+                ))
+            except (KeyError, ValueError, TypeError) as e:
+                raise ValueError(
+                    f"datasets[{i}] is malformed: {e}. "
+                    f"Required keys: csv_file, dose_mg, route."
+                )
+        params_list = [p.strip() for p in params_to_fit.split(",") if p.strip()]
+        override_set = (
+            {t.strip() for t in overrides.split(",") if t.strip()}
+            if overrides else None
+        )
+        report = fit_pbpk(
+            datasets=ds_list,
+            compound_name=compound_name,
+            params_to_fit=params_list,
+            logP=logP, pKa=pKa, fu_p=fu_p, mw=mw,
+            compound_type=compound_type, R_bp=R_bp,
+            body_weight=body_weight,
+            method=method, overrides=override_set,
+        )
+        # Add a per-dataset header so the user knows what was co-fit
+        header = ["## Co-fit summary"]
+        header.append(f"\nDatasets ({len(ds_list)}):")
+        for d in ds_list:
+            header.append(
+                f"- `{d.label}`: {d.dose_mg} mg {d.route}, "
+                f"{len(d.obs_t)} obs"
+            )
+        header.append("")
+        return "\n".join(header) + "\n" + report.to_markdown()
 
     # ----------------------------------------------------------------
     # PK-Sim XML import
